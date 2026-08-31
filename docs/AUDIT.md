@@ -11,9 +11,10 @@ bash tools/audit.sh <oracle-address> <consumer-address>   # + the live deploymen
 
 It exits with the number of failures, so it works as a CI gate.
 
-Run: 2026-08-31, against Studionet
-`0x1F3f51d9927490543519d6C61b9B544bf5caA7FB` /
-`0x0d9e9be2627B014eC78bD206d91dF24eC4B8d90d`.
+Run: 2026-08-31. **68/68 on both networks** —
+
+    bash tools/audit.sh 0x1F3f51d9927490543519d6C61b9B544bf5caA7FB 0x0d9e9be2627B014eC78bD206d91dF24eC4B8d90d   # Studionet
+    bash tools/audit.sh 0x4f35Fd3D93bDb8446C3ccf715B684222D93BB8fE 0x76B22B4aDcfBe55Bc639d8FaE42C4B5Cb41780a4   # Bradbury
 
 > There was no committed checklist from the earlier projects to copy — the
 > "item 24" that caught a `Co-Authored-By` trailer during TokenScope lived in a
@@ -92,8 +93,10 @@ because "the audit found nothing" is a claim worth being able to distinguish fro
   of the model. The test asserts the movement is never more than one rung and
   never skips a level, and the live evidence is in the README: express scanned
   twice moved `desc` 1→2 and `overall` not at all.
-- **Bradbury is not yet deployed.** `deployments.json` says so explicitly rather
-  than leaving a blank that reads as done. `tools/deploy_bradbury.sh` is ready.
+- **The Bradbury CLI does not surface a revert's `UserError` text** on the
+  `add_dependency` path the way Studionet does. The gate is evidenced there by
+  its effect instead — `has_dependency` is false and the package is absent from
+  the manifest — and the message text quoted in the README is from Studionet.
 - **Scores are point-in-time.** A package's vector moves as npm moves; the
   contract keeps 12 scans per package and `PackageConsumer` enforces a
   `max_age_seconds` policy (default 7 days) so a stale score cannot pass a gate.

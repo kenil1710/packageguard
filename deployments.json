@@ -60,7 +60,21 @@
       "chain_id": "4221",
       "rpc": "https://rpc-bradbury.genlayer.com",
       "explorer": "https://explorer-bradbury.genlayer.com/",
-      "status": "not yet deployed - run tools/deploy_bradbury.sh"
+      "PackageGuard": {
+        "address": "0x4f35Fd3D93bDb8446C3ccf715B684222D93BB8fE",
+        "tx": "0x451352f2f195c1845d26bed3d23503584e5ba0456bd16b42819708ee314185ed",
+        "artifact": "build/PackageGuard.min.py",
+        "verified": "genlayer code <address> is byte-identical to build/PackageGuard.min.py, sha256 56fd5144a97d489445c0de0cddcf7431c1139d58d485c8e97e2908640ecb3a4e - the same artifact hash as the Studionet deployment.",
+        "fee_note": "fee_wei set to 0, same reason as Studionet: the genlayer CLI hardcodes value: 0n on writes."
+      },
+      "PackageConsumer": {
+        "address": "0x76B22B4aDcfBe55Bc639d8FaE42C4B5Cb41780a4",
+        "tx": "0x93d71a57618446548242481e81222addee9749e674497c47314c9bde251498fc",
+        "artifact": "build/PackageConsumer.min.py",
+        "constructor_args": [
+          "0x4f35Fd3D93bDb8446C3ccf715B684222D93BB8fE"
+        ]
+      }
     }
   },
   "live_scores": {
@@ -328,5 +342,26 @@
     "package": "express",
     "verified": true,
     "note": "verify_risk recomputed the record from `evidence` alone - five scores, level, badge, confidence, every flag and the content hash - and matched."
+  },
+  "cross_network_result": {
+    "package": "express",
+    "content_hash": "162:16effac907d8a715",
+    "same_hash_across_networks": "Produced independently on Studionet (0x1F3f51d9927490543519d6C61b9B544bf5caA7FB) and Bradbury (0x4f35Fd3D93bDb8446C3ccf715B684222D93BB8fE) by DIFFERENT VALIDATOR SETS on different networks.",
+    "vector": "{\"age\":5,\"cadence\":3,\"depr\":0,\"deps\":1,\"desc\":2,\"dl\":7,\"fresh\":4,\"hooks\":1,\"lic\":2,\"maint\":3,\"meta\":3,\"repo\":1,\"src_dl\":1,\"stab\":3,\"stars\":4,\"versions\":5}",
+    "overall": 85,
+    "risk_level": "SAFE",
+    "what_this_shows": "All sixteen ordinals matched, the model-derived `desc` included, so the FNV digest over (package name + vector) is the same string on both chains. The artifact is also byte-identical across the two deployments, sha256 56fd5144... - so this is one program, run by two independent validator sets, agreeing exactly.",
+    "the_honest_caveat": "The model is not guaranteed to agree across rounds. An earlier Studionet deployment produced desc=1 for the same package and hence a different hash (162:af56133f1fdf6976) - while `overall` stayed 85, because the model's 3-point bound plus step-5 quantization absorbed the difference. Determinism is enforced WITHIN a round with no tolerance; across rounds the fifteen parsed ordinals are stable and the one model ordinal is bounded."
+  },
+  "bradbury_verification": {
+    "code_identical": true,
+    "fee_wei": 0,
+    "verify_risk_1": "verified: true",
+    "consumer_cross_contract_read": "get_oracle_stats returns packages_tracked 1, total_scanned 1 through the oracle",
+    "gate": {
+      "add_dependency express": "OK, has_dependency -> true, manifest count 1",
+      "add_dependency lodash": "reverted; has_dependency -> false and lodash is absent from the manifest. Note the Bradbury CLI does not surface the UserError text on this path the way Studionet does, so the revert is evidenced by the effect rather than the message.",
+      "gate_build [express, lodash]": "build FAIL, blocked [lodash], checked 2"
+    }
   }
 }

@@ -244,23 +244,51 @@ bash tools/e2e_studionet.sh <oracle-address> express left-pad event-stream
 
 ---
 
-## Live on Studionet
+## Live on two networks
 
-| contract | address |
-|---|---|
-| **PackageGuard** | [`0x1F3f51d9927490543519d6C61b9B544bf5caA7FB`](https://studio.genlayer.com) |
-| **PackageConsumer** | `0x0d9e9be2627B014eC78bD206d91dF24eC4B8d90d` |
-| render probe (throwaway) | `0xAA236cC1Cd182879915E90DAc796D94d6bc32C90` |
+| contract | Bradbury testnet | Studionet |
+|---|---|---|
+| **PackageGuard** | `0x4f35Fd3D93bDb8446C3ccf715B684222D93BB8fE` | `0x1F3f51d9927490543519d6C61b9B544bf5caA7FB` |
+| **PackageConsumer** | `0x76B22B4aDcfBe55Bc639d8FaE42C4B5Cb41780a4` | `0x0d9e9be2627B014eC78bD206d91dF24eC4B8d90d` |
+| render probe (throwaway) | — | `0xAA236cC1Cd182879915E90DAc796D94d6bc32C90` |
 
-The deployed source is **byte-identical** to `build/PackageGuard.min.py`:
+**One artifact, both networks.** The deployed source on each is byte-identical to
+`build/PackageGuard.min.py`, and to the other:
 
 ```
+$ genlayer code 0x4f35Fd3D93bDb8446C3ccf715B684222D93BB8fE | diff - build/PackageGuard.min.py
 $ genlayer code 0x1F3f51d9927490543519d6C61b9B544bf5caA7FB | diff - build/PackageGuard.min.py
 $ shasum -a 256 build/PackageGuard.min.py
 56fd5144a97d489445c0de0cddcf7431c1139d58d485c8e97e2908640ecb3a4e
 ```
 
-### Seven real packages, scored on-chain
+### The same package, the same hash, two validator sets
+
+`express`, scanned independently on each network:
+
+```
+Bradbury    content_hash 162:16effac907d8a715   overall 85   SAFE
+Studionet   content_hash 162:16effac907d8a715   overall 85   SAFE
+
+evidence (identical on both):
+  {"age":5,"cadence":3,"depr":0,"deps":1,"desc":2,"dl":7,"fresh":4,"hooks":1,
+   "lic":2,"maint":3,"meta":3,"repo":1,"src_dl":1,"stab":3,"stars":4,
+   "versions":5}
+```
+
+All sixteen ordinals matched — the model-derived `desc` included — so the digest
+over *(package name + vector)* is the same string on both chains. One program,
+two independent validator sets, agreeing exactly.
+
+**The honest caveat**, because it is the more interesting result: an earlier
+Studionet round produced `desc=1` for this same package and therefore a different
+hash — while `overall` stayed **85**, because the model's 3-point bound plus the
+step-5 quantization absorbed the difference. Determinism is enforced *within* a
+round with no tolerance at all; *across* rounds the fifteen parsed ordinals are
+stable and the single model ordinal is bounded. That is the whole design in one
+observation.
+
+### Seven real packages, scored on-chain (Studionet)
 
 | package | overall | level | badge | findings |
 |---|---|---|---|---|
