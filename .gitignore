@@ -1,0 +1,15 @@
+node_modules/
+.next/
+.env.local
+.env
+*.log
+.DS_Store
+__pycache__/
+*.pyc
+CLAUDE.md
+AGENTS.md
+.claude/
+HANDOVER.md
+.accounts.json
+.deployed.json
+*.tsbuildinfo
