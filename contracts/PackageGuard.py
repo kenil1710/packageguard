@@ -386,7 +386,15 @@ def _license_rank(raw: typing.Any) -> int:
         if term in ("OR", "AND", "WITH"):
             continue
         for known in KNOWN_LICENSES:
-            if term.startswith(known):
+            if not term.startswith(known):
+                continue
+            # A prefix match alone is too loose: "MITTENS-LICENSE" starts with
+            # "MIT". Every real SPDX identifier continues with a separator or a
+            # digit after its family name - BSD-3-Clause, Apache-2.0, GPL-3.0,
+            # CC0-1.0 - so a LETTER at the boundary means this is a different
+            # word that merely begins the same way.
+            rest = term[len(known):]
+            if rest == "" or not rest[0].isalpha():
                 return 2
     return 1
 

@@ -193,7 +193,10 @@ def _license_rank(raw: typing.Any) -> int:
   if term in ("OR", "AND", "WITH"):
    continue
   for known in KNOWN_LICENSES:
-   if term.startswith(known):
+   if not term.startswith(known):
+    continue
+   rest = term[len(known):]
+   if rest == "" or not rest[0].isalpha():
     return 2
  return 1
 def _semver_parts(version: str) -> tuple:

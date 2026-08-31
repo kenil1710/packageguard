@@ -1,0 +1,332 @@
+{
+  "project": "PackageGuard",
+  "category": "Intelligent Contracts",
+  "summary": "On-chain npm supply-chain risk assessment. Validators agree on a 16-ordinal feature vector; every score is integer arithmetic over it.",
+  "rubric_version": "1.0.0",
+  "runner": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6",
+  "data_sources": {
+    "registry": "https://registry.npmjs.org/{package}  (the packument)",
+    "downloads": "https://api.npmjs.org/downloads/point/last-week/{package}",
+    "auth": "none; both are public JSON",
+    "rejected": "https://registry.npmjs.org/-/v1/search returns npms.io's own quality/popularity/maintenance scores. Deliberately unused: consuming it would make PackageGuard a cache of somebody else's score."
+  },
+  "note": "Verify with: shasum -a 256 build/*.min.py and compare against the sha256 fields below, or genlayer code <address> | diff - build/PackageGuard.min.py",
+  "artifacts": {
+    "build/PackageGuard.min.py": {
+      "sha256": "56fd5144a97d489445c0de0cddcf7431c1139d58d485c8e97e2908640ecb3a4e",
+      "bytes": 43633,
+      "source": "contracts/PackageGuard.py",
+      "source_sha256": "ab192e10364cef77e0c07721c5b43929fe45951610470939edacbb3ae23f2743"
+    },
+    "build/PackageConsumer.min.py": {
+      "sha256": "db7036b685bf7798deb015f40a9f9aad7c2e0994772c31e41710cc39b6ad2096",
+      "bytes": 14124,
+      "source": "contracts/PackageConsumer.py",
+      "source_sha256": "e3f271b8f21e2044067904217009760c9fcca4cf028b2040dcc8c649a0ab6424"
+    }
+  },
+  "deployments": {
+    "studionet": {
+      "network": "studionet",
+      "chain_id": "61999",
+      "rpc": "https://studio.genlayer.com/api",
+      "PackageGuard": {
+        "address": "0x1F3f51d9927490543519d6C61b9B544bf5caA7FB",
+        "tx": "0xf9bde175586403fb62df1ceab68f71b37dfcddd34dde5006a4c2ad4d1cfdb889",
+        "artifact": "build/PackageGuard.min.py",
+        "verified": "genlayer code <address> is byte-identical to build/PackageGuard.min.py (43,633 bytes), checked after deploy.",
+        "fee_note": "fee_wei set to 0 on this demo deployment. The genlayer CLI hardcodes value: 0n on writes, so there is no way to attach payable value from the command line; the fee path is exercised in the offline suite instead. DEFAULT_FEE_WEI is 0.01 GEN in the source."
+      },
+      "PackageConsumer": {
+        "address": "0x0d9e9be2627B014eC78bD206d91dF24eC4B8d90d",
+        "tx": "0x85073bee526398e893a18d94affb974efad479792ada1b580ddcb152aa30a554",
+        "artifact": "build/PackageConsumer.min.py",
+        "constructor_args": [
+          "0x1F3f51d9927490543519d6C61b9B544bf5caA7FB"
+        ]
+      },
+      "render_probe": {
+        "address": "0xAA236cC1Cd182879915E90DAc796D94d6bc32C90",
+        "artifact": "contracts/_render_probe.py",
+        "why": "throwaway diagnostic, not part of PackageGuard; the evidence behind docs/PROBE.md, including the 15.6 MB packument that a validator fetched and parsed"
+      },
+      "superseded": {
+        "address": "0x79279ab1d4Ce78cB2481cb9Ed34c8B6C9A6d053c",
+        "why": "first deploy, replaced after a licence-prefix-matching tightening. Kept in the record because express was scanned on BOTH, and the two rounds are the determinism evidence in the README."
+      }
+    },
+    "testnet-bradbury": {
+      "network": "testnet-bradbury",
+      "chain_id": "4221",
+      "rpc": "https://rpc-bradbury.genlayer.com",
+      "explorer": "https://explorer-bradbury.genlayer.com/",
+      "status": "not yet deployed - run tools/deploy_bradbury.sh"
+    }
+  },
+  "live_scores": {
+    "express": {
+      "score_id": 1,
+      "latest_version": "5.2.1",
+      "overall": 85,
+      "risk_level": "SAFE",
+      "badge": "TRUSTED",
+      "confidence": "HIGH",
+      "scores": {
+        "community": 90,
+        "maintenance": 70,
+        "maturity": 100,
+        "popularity": 100,
+        "security": 75
+      },
+      "flags": [
+        "HEAVY_DEPS"
+      ],
+      "bands": {
+        "age": ">8y",
+        "direct_deps": "15-29",
+        "downloads": ">=100M",
+        "last_publish": "3-6mo"
+      },
+      "content_hash": "162:16effac907d8a715",
+      "evidence": "{\"age\":5,\"cadence\":3,\"depr\":0,\"deps\":1,\"desc\":2,\"dl\":7,\"fresh\":4,\"hooks\":1,\"lic\":2,\"maint\":3,\"meta\":3,\"repo\":1,\"src_dl\":1,\"stab\":3,\"stars\":4,\"versions\":5}"
+    },
+    "left-pad": {
+      "score_id": 2,
+      "latest_version": "1.3.0",
+      "overall": 65,
+      "risk_level": "MODERATE",
+      "badge": "REVIEW",
+      "confidence": "HIGH",
+      "scores": {
+        "community": 75,
+        "maintenance": 5,
+        "maturity": 100,
+        "popularity": 65,
+        "security": 100
+      },
+      "flags": [
+        "DEPRECATED",
+        "ABANDONED",
+        "NO_RECENT_RELEASE"
+      ],
+      "bands": {
+        "age": ">8y",
+        "direct_deps": "0",
+        "downloads": "1M-10M",
+        "last_publish": ">4y"
+      },
+      "content_hash": "163:7da5db08d7d5f685",
+      "evidence": "{\"age\":5,\"cadence\":0,\"depr\":1,\"deps\":5,\"desc\":2,\"dl\":5,\"fresh\":0,\"hooks\":1,\"lic\":2,\"maint\":2,\"meta\":3,\"repo\":1,\"src_dl\":1,\"stab\":3,\"stars\":2,\"versions\":3}"
+    },
+    "event-stream": {
+      "score_id": 3,
+      "latest_version": "4.0.1",
+      "overall": 65,
+      "risk_level": "MODERATE",
+      "badge": "REVIEW",
+      "confidence": "HIGH",
+      "scores": {
+        "community": 65,
+        "maintenance": 20,
+        "maturity": 100,
+        "popularity": 70,
+        "security": 90
+      },
+      "flags": [
+        "ABANDONED",
+        "SINGLE_MAINTAINER",
+        "NO_RECENT_RELEASE"
+      ],
+      "bands": {
+        "age": ">8y",
+        "direct_deps": "4-7",
+        "downloads": "1M-10M",
+        "last_publish": ">4y"
+      },
+      "content_hash": "167:a3dadd4f207560a9",
+      "evidence": "{\"age\":5,\"cadence\":0,\"depr\":0,\"deps\":3,\"desc\":2,\"dl\":5,\"fresh\":0,\"hooks\":1,\"lic\":2,\"maint\":1,\"meta\":3,\"repo\":1,\"src_dl\":1,\"stab\":3,\"stars\":3,\"versions\":4}"
+    },
+    "flatmap-stream": {
+      "score_id": 4,
+      "latest_version": "0.0.1-security",
+      "overall": 30,
+      "risk_level": "HIGH_RISK",
+      "badge": "AVOID",
+      "confidence": "MEDIUM",
+      "scores": {
+        "community": 35,
+        "maintenance": 0,
+        "maturity": 50,
+        "popularity": 10,
+        "security": 70
+      },
+      "flags": [
+        "NO_LICENSE",
+        "ABANDONED",
+        "SINGLE_MAINTAINER",
+        "PRERELEASE",
+        "LOW_ADOPTION",
+        "NO_RECENT_RELEASE"
+      ],
+      "bands": {
+        "age": "4-8y",
+        "direct_deps": "0",
+        "downloads": "100-1K",
+        "last_publish": ">4y"
+      },
+      "content_hash": "169:ef33fcf44d8eb9b6",
+      "evidence": "{\"age\":4,\"cadence\":0,\"depr\":0,\"deps\":5,\"desc\":0,\"dl\":1,\"fresh\":0,\"hooks\":1,\"lic\":0,\"maint\":1,\"meta\":2,\"repo\":1,\"src_dl\":1,\"stab\":0,\"stars\":0,\"versions\":0}"
+    },
+    "esbuild": {
+      "score_id": 5,
+      "latest_version": "0.28.2",
+      "overall": 80,
+      "risk_level": "SAFE",
+      "badge": "SAFE",
+      "confidence": "HIGH",
+      "scores": {
+        "community": 55,
+        "maintenance": 95,
+        "maturity": 75,
+        "popularity": 90,
+        "security": 75
+      },
+      "flags": [
+        "INSTALL_SCRIPTS",
+        "SINGLE_MAINTAINER",
+        "UNSTABLE_API"
+      ],
+      "bands": {
+        "age": ">8y",
+        "direct_deps": "0",
+        "downloads": ">=100M",
+        "last_publish": "<1mo"
+      },
+      "content_hash": "162:6fa28d256f831b9f",
+      "evidence": "{\"age\":5,\"cadence\":4,\"depr\":0,\"deps\":5,\"desc\":2,\"dl\":7,\"fresh\":6,\"hooks\":0,\"lic\":2,\"maint\":1,\"meta\":2,\"repo\":1,\"src_dl\":1,\"stab\":1,\"stars\":1,\"versions\":5}"
+    },
+    "node-sass": {
+      "score_id": 6,
+      "latest_version": "9.0.0",
+      "overall": 55,
+      "risk_level": "MODERATE",
+      "badge": "REVIEW",
+      "confidence": "HIGH",
+      "scores": {
+        "community": 75,
+        "maintenance": 5,
+        "maturity": 100,
+        "popularity": 60,
+        "security": 55
+      },
+      "flags": [
+        "DEPRECATED",
+        "INSTALL_SCRIPTS",
+        "ABANDONED",
+        "NO_RECENT_RELEASE"
+      ],
+      "bands": {
+        "age": ">8y",
+        "direct_deps": "8-14",
+        "downloads": "100K-1M",
+        "last_publish": "2-4y"
+      },
+      "content_hash": "164:b4b37378e50c139d",
+      "evidence": "{\"age\":5,\"cadence\":0,\"depr\":1,\"deps\":2,\"desc\":2,\"dl\":4,\"fresh\":1,\"hooks\":0,\"lic\":2,\"maint\":2,\"meta\":3,\"repo\":1,\"src_dl\":1,\"stab\":3,\"stars\":3,\"versions\":4}"
+    },
+    "chalk": {
+      "score_id": 7,
+      "latest_version": "6.0.0",
+      "overall": 85,
+      "risk_level": "SAFE",
+      "badge": "TRUSTED",
+      "confidence": "HIGH",
+      "scores": {
+        "community": 65,
+        "maintenance": 65,
+        "maturity": 100,
+        "popularity": 95,
+        "security": 100
+      },
+      "flags": [
+        "SINGLE_MAINTAINER"
+      ],
+      "bands": {
+        "age": ">8y",
+        "direct_deps": "0",
+        "downloads": ">=100M",
+        "last_publish": "1-3mo"
+      },
+      "content_hash": "160:430ff6ea55895455",
+      "evidence": "{\"age\":5,\"cadence\":2,\"depr\":0,\"deps\":5,\"desc\":2,\"dl\":7,\"fresh\":5,\"hooks\":1,\"lic\":2,\"maint\":1,\"meta\":3,\"repo\":1,\"src_dl\":1,\"stab\":3,\"stars\":3,\"versions\":3}"
+    }
+  },
+  "corpus_totals": {
+    "packages_tracked": 7,
+    "total_scanned": 7,
+    "rejected": 0,
+    "risk_levels": {
+      "SAFE": 3,
+      "MODERATE": 3,
+      "HIGH_RISK": 1
+    },
+    "average_scores": {
+      "overall": 66,
+      "popularity": 70,
+      "maintenance": 37,
+      "security": 80,
+      "maturity": 89,
+      "community": 65
+    },
+    "what_this_shows": "Average maintenance is 37 against security 80 and maturity 89. npm's problem is not that packages are badly built, it is that they stop being looked after - which is why maintenance carries the same 25% weight as popularity."
+  },
+  "determinism_result": {
+    "package": "express",
+    "round_1": {
+      "deployment": "0x79279ab1d4Ce78cB2481cb9Ed34c8B6C9A6d053c",
+      "desc": 1,
+      "community": 80,
+      "overall": 85,
+      "content_hash": "162:af56133f1fdf6976"
+    },
+    "round_2": {
+      "deployment": "0x1F3f51d9927490543519d6C61b9B544bf5caA7FB",
+      "desc": 2,
+      "community": 90,
+      "overall": 85,
+      "content_hash": "162:16effac907d8a715"
+    },
+    "what_this_shows": "Two independent validator rounds, minutes apart. All 15 PARSED ordinals identical; the single model-derived ordinal (desc) moved one rung. The 3-point model bound plus step-5 quantization absorbed it entirely and the published score did not move. Within each round every validator agreed - _agrees has no tolerance, so the round could not have committed otherwise.",
+    "caveat": "The two deployments differ by one commit, a licence-prefix-matching tightening that cannot affect an MIT package, so lic is 2 under both."
+  },
+  "composability_result": {
+    "consumer": "PackageConsumer.add_dependency goes through PackageGuard.require_safe, which REVERTS rather than returning false.",
+    "added": [
+      "express (85 SAFE, TRUSTED)",
+      "chalk (85 SAFE, TRUSTED)"
+    ],
+    "refused": {
+      "esbuild": "REVERT: carries banned flag(s) INSTALL_SCRIPTS; it scores 80 but the policy is not about the score alone",
+      "flatmap-stream": "REVERT: scores 30 (HIGH_RISK), below the required 50; flags: NO_LICENSE,ABANDONED,SINGLE_MAINTAINER,PRERELEASE,LOW_ADOPTION,NO_RECENT_RELEASE",
+      "lodash": "REVERT: no scan on record for lodash"
+    },
+    "gate_build": {
+      "build": "FAIL",
+      "checked": 6,
+      "blocked": [
+        "esbuild",
+        "left-pad",
+        "flatmap-stream",
+        "lodash"
+      ]
+    },
+    "degradation": "preview_dependency on the same unscanned package returns {allowed:false, verdict:'BLOCK', reason:'never scanned; call PackageGuard.request_scan'} instead of reverting, so a UI can explain rather than fail.",
+    "why_esbuild_matters": "esbuild scores 80 and is SAFE - healthy and actively maintained - and the CI gate refuses it anyway for running a postinstall. The oracle says how well kept a package is; whether that is acceptable is the consumer's decision, and they are separate contracts for exactly that reason."
+  },
+  "verify_result": {
+    "score_id": 1,
+    "package": "express",
+    "verified": true,
+    "note": "verify_risk recomputed the record from `evidence` alone - five scores, level, badge, confidence, every flag and the content hash - and matched."
+  }
+}

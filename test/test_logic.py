@@ -522,6 +522,16 @@ class TestLicense(unittest.TestCase):
     def test_case_insensitive(self):
         self.assertEqual(M._license_rank("mit"), 2)
 
+    def test_a_word_that_merely_starts_like_a_license_is_not_one(self):
+        # "MITTENS-LICENSE" begins with "MIT"; a prefix match alone is too loose
+        self.assertEqual(M._license_rank("MITTENS-LICENSE"), 1)
+        self.assertEqual(M._license_rank("GPLONK"), 1)
+
+    def test_spdx_families_with_a_digit_or_dash_still_match(self):
+        for text in ("BSD-3-Clause", "Apache-2.0", "GPL-3.0-only", "CC0-1.0",
+                     "MIT-0", "0BSD", "MPL-2.0", "EPL-2.0"):
+            self.assertEqual(M._license_rank(text), 2, text)
+
 
 # --------------------------------------------------------------------------
 # 4. semver
