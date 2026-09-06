@@ -12,13 +12,31 @@
 # - and whose policy nobody can quietly edit inside a build. The rule is public,
 # the evidence behind every decision is public, and the check is a transaction.
 #
-# HOW IT USES THE ORACLE. `add_dependency` goes through PackageGuard's
-# `require_safe`, which REVERTS rather than returning false. The consumer has no
-# branch to forget: an unsafe package fails the whole call, and the manifest
-# cannot contain a package that did not pass. `preview_dependency` is the same
-# question asked without a transaction, and it DEGRADES - it returns
-# `{allowed: false, reason: …}` for a package that has never been scanned, so a
-# UI can explain the situation instead of showing a revert.
+# HOW IT USES THE ORACLE. Every decision - `add_dependency`,
+# `preview_dependency` and `gate_build` alike - is made by one function,
+# `_assess`, reading PackageGuard's `get_risk`. A preview and a build therefore
+# cannot answer differently, because they are not two implementations of the
+# same rule. PackageGuard's `require_safe` still has the last word before
+# anything is written: the manifest row is built from what require_safe
+# RETURNED, so the oracle's own reverting gate is load-bearing rather than
+# decorative.
+#
+# A REFUSAL IS NOT A REVERT. `add_dependency` returns `{ok: false, reason:
+# "blocked by policy"}` for a package that fails the rule, and increments
+# `blocked_attempts` on the way out. This is the only way that counter can mean
+# anything: a revert unwinds the entire call, so a counter bumped immediately
+# before raising is rolled back with everything else and the contract silently
+# forgets every request it turned down. Nothing raises after the increment.
+#
+# An oracle that is UNREACHABLE is not a refusal and is not counted - it raises.
+# "the source was down" and "the package failed policy" are different answers,
+# and quietly filing the first under the second is how an availability failure
+# becomes a permanent, wrong record.
+#
+# FREEZE MEANS FROZEN. After `freeze()` no public write succeeds - not
+# add_dependency, not remove_dependency, not a policy or ownership change. A
+# guard on some mutators and not others would make the published manifest worth
+# exactly nothing to the person it is published for.
 #
 # The banned-flag rule is the consumer's own, applied ON TOP of the oracle's
 # score. A package can score 80 and still be refused for carrying a
@@ -193,6 +211,17 @@ class PackageConsumer(gl.Contract):
         if gl.message.sender_address != self.owner:
             raise gl.vm.UserError(ERR + " owner only")
 
+    def _require_unfrozen(self) -> None:
+        """The single check every mutating entry point makes.
+
+        freeze() is the only promise this contract makes to somebody who does
+        not trust its owner, so it has to hold for EVERY write rather than for
+        whichever ones were written first. One guard, called from one place, is
+        what makes that auditable - by a reader, and by the static test that
+        asserts no @gl.public.write is missing this line."""
+        if self.frozen:
+            raise gl.vm.UserError(ERR + " contract is frozen")
+
     def _oracle(self) -> typing.Any:
         return IPackageGuard(self.oracle)
 
@@ -240,12 +269,24 @@ class PackageConsumer(gl.Contract):
         try:
             rec = self._oracle().view().get_risk(name)
         except Exception as e:
+            # `oracle_error` separates "could not ask" from "asked, and the
+            # answer was no". The read paths still degrade to a reason string;
+            # add_dependency raises on it rather than recording a refusal that
+            # says nothing about the package.
             return {"package": name, "allowed": False, "verdict": "BLOCK",
+                    "oracle_error": True,
                     "reason": "oracle unreachable: " + _short(str(e), 90),
                     "risk_level": "UNKNOWN", "badge": "UNSCANNED",
                     "min_score": bar}
-        if not isinstance(rec, dict) or not rec.get("found"):
+        if not isinstance(rec, dict):
             return {"package": name, "allowed": False, "verdict": "BLOCK",
+                    "oracle_error": True,
+                    "reason": "oracle returned an unexpected shape",
+                    "risk_level": "UNKNOWN", "badge": "UNSCANNED",
+                    "min_score": bar}
+        if not rec.get("found"):
+            return {"package": name, "allowed": False, "verdict": "BLOCK",
+                    "oracle_error": False,
                     "reason": "never scanned; call PackageGuard.request_scan",
                     "risk_level": "UNKNOWN", "badge": "UNSCANNED",
                     "min_score": bar}
@@ -270,6 +311,7 @@ class PackageConsumer(gl.Contract):
             "package": name,
             "allowed": verdict == "ALLOW",
             "verdict": verdict,
+            "oracle_error": False,
             "reason": reason,
             "overall_score": overall,
             "risk_level": str(rec.get("risk_level") or "UNKNOWN"),
@@ -287,44 +329,55 @@ class PackageConsumer(gl.Contract):
 
     @gl.public.write
     def add_dependency(self, package_name: str) -> typing.Any:
-        """Add a package to the manifest, or REVERT.
+        """Add a package to the manifest, or record a refusal.
 
-        The first thing this does is call PackageGuard.require_safe, which
-        raises. That is the point: there is no boolean to ignore and no branch to
-        forget, so the manifest physically cannot hold a package that failed
-        policy. The banned-flag rule is applied afterwards and raises the same
-        way."""
-        if self.frozen:
-            raise gl.vm.UserError(ERR + " manifest is frozen")
+        A package that fails the policy does NOT revert. It increments
+        `blocked_attempts` and returns `{ok: false, reason: "blocked by
+        policy"}`, and nothing after that increment can raise. This is the only
+        way the counter can mean anything: a revert unwinds the whole call, so
+        a counter bumped immediately before raising is rolled back with it and
+        the contract quietly forgets every request it turned down.
+
+        The verdict comes from `_assess` - the same function preview_dependency
+        and gate_build call - so a preview and a build cannot disagree. An
+        unreachable oracle is not a verdict and is not counted: it raises,
+        because "the source was down" and "the package failed policy" are
+        different answers.
+
+        PackageGuard.require_safe still has the last word. It is called only on
+        the path that is about to write, and the row is built from what it
+        RETURNED, so the oracle's own reverting gate decides what may enter the
+        manifest rather than merely commenting on it."""
+        self._require_unfrozen()
         name = _norm_package(package_name)
         if len(self.deps) >= MAX_DEPENDENCIES and self._find(name) < 0:
             raise gl.vm.UserError(ERR + " manifest is full")
 
-        bar = int(self.min_score)
-        # Reverts on its own if the package is unscanned or below the bar. The
-        # error text comes back from the oracle unchanged.
-        rec = self._oracle().view().require_safe(name, bar)
+        now = self._now()
+        got = self._assess(name, now)
+        if got.get("oracle_error"):
+            raise gl.vm.UserError(
+                ERR + " " + _short(str(got.get("reason")), 160))
+        if not got.get("allowed"):
+            self.blocked_count = u32(int(self.blocked_count) + 1)
+            self._note("blocked", name + " " + str(got.get("reason")))
+            return {
+                "ok": False,
+                "status": "BLOCKED",
+                "package": name,
+                "verdict": "BLOCK",
+                "reason": "blocked by policy",
+                "detail": str(got.get("reason")),
+                "overall_score": int(got.get("overall_score") or 0),
+                "min_score": int(self.min_score),
+                "blocked_attempts": int(self.blocked_count),
+                "manifest_size": len(self.deps),
+            }
+
+        rec = self._oracle().view().require_safe(name, int(self.min_score))
         if not isinstance(rec, dict):
             raise gl.vm.UserError(ERR + " oracle returned an unexpected shape")
-
-        now = self._now()
-        age = now - int(rec.get("scanned_at") or 0)
-        if age > int(self.max_age_seconds):
-            self.blocked_count = u32(int(self.blocked_count) + 1)
-            raise gl.vm.UserError(
-                ERR + " " + _short(name, 60) + " was last scanned " + str(age)
-                + "s ago; policy requires a scan within "
-                + str(int(self.max_age_seconds)) + "s")
-
         flags = rec.get("risk_flags")
-        hits = self._banned_hits(flags)
-        if len(hits) > 0:
-            self.blocked_count = u32(int(self.blocked_count) + 1)
-            raise gl.vm.UserError(
-                ERR + " " + _short(name, 60) + " carries banned flag(s) "
-                + ",".join(hits) + "; it scores "
-                + str(int(rec.get("overall_score") or 0))
-                + " but the policy is not about the score alone")
 
         flat = ",".join([_flat(str(x)).upper()
                          for x in (flags if isinstance(flags, list) else [])])
@@ -342,13 +395,19 @@ class PackageConsumer(gl.Contract):
         item.added_at = u64(now)
         self.present[name] = True
         self._note("add", name + " " + str(int(item.overall)))
-        return {"status": "OK", "added": self._row(item),
+        return {"ok": True, "status": "OK", "added": self._row(item),
                 "manifest_size": len(self.deps)}
 
     @gl.public.write
     def remove_dependency(self, package_name: str) -> typing.Any:
-        """Drop a package from the manifest. Anyone may remove; only the policy
-        decides what may be ADDED, and removing is always the safe direction."""
+        """Drop a package from the manifest.
+
+        Anyone may remove while the contract is open - only the policy decides
+        what may be ADDED, and removing is always the safe direction. Once
+        frozen, nobody may: a manifest whose entries can still be deleted is
+        not immutable, and freeze() would be a claim the contract does not
+        keep."""
+        self._require_unfrozen()
         name = _norm_package(package_name)
         idx = self._find(name)
         if idx < 0:
@@ -370,7 +429,7 @@ class PackageConsumer(gl.Contract):
         self.deps.pop()
         del self.present[name]
         self._note("remove", name)
-        return {"status": "OK", "removed": name,
+        return {"ok": True, "status": "OK", "removed": name,
                 "manifest_size": len(self.deps)}
 
     # --- reads
@@ -505,8 +564,7 @@ class PackageConsumer(gl.Contract):
         that silently rewrote history would make the manifest a claim about the
         current rule rather than a record of what was approved."""
         self._only_owner()
-        if self.frozen:
-            raise gl.vm.UserError(ERR + " policy is frozen")
+        self._require_unfrozen()
         bar = _clamp_bar(min_score)
         age = int(max_age_seconds)
         if age < 60:
@@ -520,28 +578,35 @@ class PackageConsumer(gl.Contract):
     @gl.public.write
     def set_oracle(self, new_oracle: str) -> typing.Any:
         self._only_owner()
-        if self.frozen:
-            raise gl.vm.UserError(ERR + " policy is frozen")
+        self._require_unfrozen()
         self.oracle = Address(str(new_oracle))
         self._note("set_oracle", str(self.oracle.as_hex))
-        return {"status": "OK", "oracle": str(self.oracle.as_hex)}
+        return {"ok": True, "status": "OK", "oracle": str(self.oracle.as_hex)}
 
     @gl.public.write
     def freeze(self) -> typing.Any:
-        """One-way. After this the policy and the manifest are immutable, which
-        is what makes a published manifest worth anything to somebody who does
-        not trust its owner."""
+        """One-way, and total. After this NO public write succeeds - not
+        add_dependency, not remove_dependency, not a policy, oracle or
+        ownership change - which is what makes a published manifest worth
+        anything to somebody who does not trust its owner. Freezing twice is
+        itself refused: `frozen` is state, and a sealed contract has no writes
+        left, including this one."""
         self._only_owner()
+        self._require_unfrozen()
         self.frozen = True
-        self._note("freeze", "policy and manifest are now immutable")
-        return {"status": "OK", "frozen": True}
+        self._note("freeze", "every public write is now refused")
+        return {"ok": True, "status": "OK", "frozen": True}
 
     @gl.public.write
     def transfer_ownership(self, new_owner: str) -> typing.Any:
+        """Frozen too. Handing the keys on after the contract is sealed would
+        buy the new owner nothing, and a mutator that skips the guard is
+        exactly the shape of bug freeze() exists to rule out."""
         self._only_owner()
+        self._require_unfrozen()
         addr = Address(str(new_owner))
         if addr == Address("0x" + "0" * 40):
             raise gl.vm.UserError(ERR + " owner cannot be the zero address")
         self.owner = addr
         self._note("transfer_ownership", str(addr.as_hex))
-        return {"status": "OK", "owner": str(addr.as_hex)}
+        return {"ok": True, "status": "OK", "owner": str(addr.as_hex)}

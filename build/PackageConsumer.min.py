@@ -119,6 +119,9 @@ class PackageConsumer(gl.Contract):
  def _only_owner(self) -> None:
   if gl.message.sender_address != self.owner:
    raise gl.vm.UserError(ERR + " owner only")
+ def _require_unfrozen(self) -> None:
+  if self.frozen:
+   raise gl.vm.UserError(ERR + " contract is frozen")
  def _oracle(self) -> typing.Any:
   return IPackageGuard(self.oracle)
  def _note(self, action: str, detail: str) -> None:
@@ -158,11 +161,19 @@ class PackageConsumer(gl.Contract):
    rec = self._oracle().view().get_risk(name)
   except Exception as e:
    return {"package": name, "allowed": False, "verdict": "BLOCK",
+   "oracle_error": True,
    "reason": "oracle unreachable: " + _short(str(e), 90),
    "risk_level": "UNKNOWN", "badge": "UNSCANNED",
    "min_score": bar}
-  if not isinstance(rec, dict) or not rec.get("found"):
+  if not isinstance(rec, dict):
    return {"package": name, "allowed": False, "verdict": "BLOCK",
+   "oracle_error": True,
+   "reason": "oracle returned an unexpected shape",
+   "risk_level": "UNKNOWN", "badge": "UNSCANNED",
+   "min_score": bar}
+  if not rec.get("found"):
+   return {"package": name, "allowed": False, "verdict": "BLOCK",
+   "oracle_error": False,
    "reason": "never scanned; call PackageGuard.request_scan",
    "risk_level": "UNKNOWN", "badge": "UNSCANNED",
    "min_score": bar}
@@ -187,6 +198,7 @@ class PackageConsumer(gl.Contract):
   "package": name,
   "allowed": verdict == "ALLOW",
   "verdict": verdict,
+  "oracle_error": False,
   "reason": reason,
   "overall_score": overall,
   "risk_level": str(rec.get("risk_level") or "UNKNOWN"),
@@ -201,32 +213,34 @@ class PackageConsumer(gl.Contract):
   }
  @gl.public.write
  def add_dependency(self, package_name: str) -> typing.Any:
-  if self.frozen:
-   raise gl.vm.UserError(ERR + " manifest is frozen")
+  self._require_unfrozen()
   name = _norm_package(package_name)
   if len(self.deps) >= MAX_DEPENDENCIES and self._find(name) < 0:
    raise gl.vm.UserError(ERR + " manifest is full")
-  bar = int(self.min_score)
-  rec = self._oracle().view().require_safe(name, bar)
+  now = self._now()
+  got = self._assess(name, now)
+  if got.get("oracle_error"):
+   raise gl.vm.UserError(
+   ERR + " " + _short(str(got.get("reason")), 160))
+  if not got.get("allowed"):
+   self.blocked_count = u32(int(self.blocked_count) + 1)
+   self._note("blocked", name + " " + str(got.get("reason")))
+   return {
+   "ok": False,
+   "status": "BLOCKED",
+   "package": name,
+   "verdict": "BLOCK",
+   "reason": "blocked by policy",
+   "detail": str(got.get("reason")),
+   "overall_score": int(got.get("overall_score") or 0),
+   "min_score": int(self.min_score),
+   "blocked_attempts": int(self.blocked_count),
+   "manifest_size": len(self.deps),
+   }
+  rec = self._oracle().view().require_safe(name, int(self.min_score))
   if not isinstance(rec, dict):
    raise gl.vm.UserError(ERR + " oracle returned an unexpected shape")
-  now = self._now()
-  age = now - int(rec.get("scanned_at") or 0)
-  if age > int(self.max_age_seconds):
-   self.blocked_count = u32(int(self.blocked_count) + 1)
-   raise gl.vm.UserError(
-   ERR + " " + _short(name, 60) + " was last scanned " + str(age)
-   + "s ago; policy requires a scan within "
-   + str(int(self.max_age_seconds)) + "s")
   flags = rec.get("risk_flags")
-  hits = self._banned_hits(flags)
-  if len(hits) > 0:
-   self.blocked_count = u32(int(self.blocked_count) + 1)
-   raise gl.vm.UserError(
-   ERR + " " + _short(name, 60) + " carries banned flag(s) "
-   + ",".join(hits) + "; it scores "
-   + str(int(rec.get("overall_score") or 0))
-   + " but the policy is not about the score alone")
   flat = ",".join([_flat(str(x)).upper()
   for x in (flags if isinstance(flags, list) else [])])
   idx = self._find(name)
@@ -243,10 +257,11 @@ class PackageConsumer(gl.Contract):
   item.added_at = u64(now)
   self.present[name] = True
   self._note("add", name + " " + str(int(item.overall)))
-  return {"status": "OK", "added": self._row(item),
+  return {"ok": True, "status": "OK", "added": self._row(item),
   "manifest_size": len(self.deps)}
  @gl.public.write
  def remove_dependency(self, package_name: str) -> typing.Any:
+  self._require_unfrozen()
   name = _norm_package(package_name)
   idx = self._find(name)
   if idx < 0:
@@ -268,7 +283,7 @@ class PackageConsumer(gl.Contract):
   self.deps.pop()
   del self.present[name]
   self._note("remove", name)
-  return {"status": "OK", "removed": name,
+  return {"ok": True, "status": "OK", "removed": name,
   "manifest_size": len(self.deps)}
  @gl.public.view
  def check_risk(self, package_name: str) -> typing.Any:
@@ -377,8 +392,7 @@ class PackageConsumer(gl.Contract):
  def set_policy(self, min_score: int, banned_flags: str,
  max_age_seconds: int) -> typing.Any:
   self._only_owner()
-  if self.frozen:
-   raise gl.vm.UserError(ERR + " policy is frozen")
+  self._require_unfrozen()
   bar = _clamp_bar(min_score)
   age = int(max_age_seconds)
   if age < 60:
@@ -391,23 +405,24 @@ class PackageConsumer(gl.Contract):
  @gl.public.write
  def set_oracle(self, new_oracle: str) -> typing.Any:
   self._only_owner()
-  if self.frozen:
-   raise gl.vm.UserError(ERR + " policy is frozen")
+  self._require_unfrozen()
   self.oracle = Address(str(new_oracle))
   self._note("set_oracle", str(self.oracle.as_hex))
-  return {"status": "OK", "oracle": str(self.oracle.as_hex)}
+  return {"ok": True, "status": "OK", "oracle": str(self.oracle.as_hex)}
  @gl.public.write
  def freeze(self) -> typing.Any:
   self._only_owner()
+  self._require_unfrozen()
   self.frozen = True
-  self._note("freeze", "policy and manifest are now immutable")
-  return {"status": "OK", "frozen": True}
+  self._note("freeze", "every public write is now refused")
+  return {"ok": True, "status": "OK", "frozen": True}
  @gl.public.write
  def transfer_ownership(self, new_owner: str) -> typing.Any:
   self._only_owner()
+  self._require_unfrozen()
   addr = Address(str(new_owner))
   if addr == Address("0x" + "0" * 40):
    raise gl.vm.UserError(ERR + " owner cannot be the zero address")
   self.owner = addr
   self._note("transfer_ownership", str(addr.as_hex))
-  return {"status": "OK", "owner": str(addr.as_hex)}
+  return {"ok": True, "status": "OK", "owner": str(addr.as_hex)}

@@ -36,11 +36,62 @@ ck "artifact pin matches source pin (consumer)" \
 echo "== 3. offline suite =="
 ck "python3 test/test_logic.py passes with 0 failures and 0 skips" \
    "python3 test/test_logic.py 2>&1 | tail -3 | grep -qx 'OK'"
-ck "suite is >= 300 tests" \
-   "[ \$(python3 test/test_logic.py 2>&1 | grep -oE '^Ran [0-9]+' | grep -oE '[0-9]+') -ge 300 ]"
+ck "suite is >= 380 tests" \
+   "[ \$(python3 test/test_logic.py 2>&1 | grep -oE '^Ran [0-9]+' | grep -oE '[0-9]+') -ge 380 ]"
 ck "suite touches no network (stub raises on web/model access)" \
    "grep -q 'offline tests must not touch the network or a model' test/test_logic.py"
 ck "fixtures are regenerable from the live registry" "[ -f tools/make_fixtures.py ]"
+
+echo "== 3b. the two review findings, checked in the source =="
+# Joaquin, on PackageConsumer: freeze() claimed the manifest was immutable while
+# remove_dependency stayed open, and blocked_count was incremented immediately
+# before a revert that rolled the increment back. Both are asserted mechanically
+# rather than eyeballed, over the SOURCE and the deployed ARTIFACT.
+for f in contracts/PackageConsumer.py build/PackageConsumer.min.py; do
+  ck "every @gl.public.write in $f checks frozen" \
+     "python3 -c \"
+import ast,sys
+t=ast.parse(open('$f').read())
+bad=[n.name for n in ast.walk(t)
+     if isinstance(n,ast.FunctionDef)
+     and any('gl.public.write' in ast.unparse(d) for d in n.decorator_list)
+     and 'self._require_unfrozen()' not in ast.unparse(n)]
+sys.exit(1 if bad else 0)\""
+done
+ck "remove_dependency refuses when frozen (finding 1)" \
+   "python3 -c \"
+import ast,sys
+t=ast.parse(open('contracts/PackageConsumer.py').read())
+f=[n for n in ast.walk(t) if isinstance(n,ast.FunctionDef)
+   and n.name=='remove_dependency'][0]
+sys.exit(0 if 'self._require_unfrozen()' in ast.unparse(f) else 1)\""
+ck "add_dependency returns a refusal instead of reverting (finding 2)" \
+   "grep -q 'blocked by policy' contracts/PackageConsumer.py"
+for f in contracts/PackageGuard.py contracts/PackageConsumer.py \
+         build/PackageGuard.min.py build/PackageConsumer.min.py; do
+  ck "no storage write is followed by a reachable raise in $f" \
+     "python3 -c \"
+import sys
+sys.path.insert(0,'test')
+import test_logic as T
+from pathlib import Path
+sys.exit(1 if T.revert_after_write(Path('$f')) else 0)\""
+done
+ck "the new tests fail against the pre-fix contract" \
+   "git show HEAD:contracts/PackageConsumer.py > /tmp/_prefix.py && python3 -c \"
+import sys, unittest
+from pathlib import Path
+sys.path.insert(0,'test')
+import test_logic as T
+s=unittest.TestSuite()
+L=unittest.defaultTestLoader.loadTestsFromTestCase
+s.addTests(L(T._behaviour_suite(Path('/tmp/_prefix.py'),'old')))
+s.addTests(L(T._static_guards(Path('/tmp/_prefix.py'),'old')))
+r=unittest.TextTestRunner(verbosity=0).run(s)
+names={str(t).split(' ')[0] for t,_ in r.failures+r.errors}
+need={'test_freeze_then_remove_dependency_is_refused',
+      'test_blocked_attempt_increments_the_counter'}
+sys.exit(0 if need <= names else 1)\" 2>/dev/null"
 
 echo "== 4. artifacts are current =="
 python3 tools/minify_contract.py contracts/PackageGuard.py -o /tmp/_pg.min.py >/dev/null 2>&1
@@ -86,7 +137,8 @@ for m in request_scan set_fee get_risk get_risk_by_id get_risk_history is_safe \
   ck "PackageGuard.$m" "grep -q \"def $m(\" contracts/PackageGuard.py"
 done
 for m in add_dependency remove_dependency check_risk preview_dependency \
-         gate_build get_manifest get_policy set_policy freeze; do
+         gate_build get_manifest get_policy set_policy freeze \
+         transfer_ownership set_oracle _require_unfrozen; do
   ck "PackageConsumer.$m" "grep -q \"def $m(\" contracts/PackageConsumer.py"
 done
 
@@ -114,6 +166,13 @@ if [ -n "$ORACLE" ]; then
        "genlayer call $CONSUMER preview_dependency --args lodash 2>/dev/null | grep -q 'never scanned'"
     ck "gate_build fails a mixed dependency list" \
        "genlayer call $CONSUMER gate_build --args '[\"express\",\"flatmap-stream\"]' 2>/dev/null | grep -q \"build: 'FAIL'\""
+    # the two review fixes, read back off the live contract
+    ck "refused adds were actually recorded (blocked_attempts > 0)" \
+       "[ \$(genlayer call $CONSUMER get_policy 2>/dev/null | grep -oE 'blocked_attempts: [0-9]+' | grep -oE '[0-9]+') -gt 0 ]"
+    ck "the live consumer is frozen and its manifest survived the freeze" \
+       "genlayer call $CONSUMER get_policy 2>/dev/null | grep -q 'frozen: true' && [ \$(genlayer call $CONSUMER get_manifest 2>/dev/null | grep -oE 'count: [0-9]+' | grep -oE '[0-9]+') -gt 0 ]"
+    ck "preview still reports oracle_error false when the oracle is up" \
+       "genlayer call $CONSUMER preview_dependency --args lodash 2>/dev/null | grep -q 'oracle_error: false'"
   fi
 fi
 

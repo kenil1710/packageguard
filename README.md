@@ -175,20 +175,43 @@ leaderboard.
 > *"CI pipeline rejects packages scoring below 50."*
 
 A dependency allowlist whose policy is a contract rather than a config file.
-`add_dependency` calls `PackageGuard.require_safe` **first**, and `require_safe`
-reverts rather than returning false — so the consumer has no boolean to ignore
-and no branch to forget, and the manifest physically cannot hold a package that
-failed policy.
+Every decision — `add_dependency`, `preview_dependency` and `gate_build` alike —
+is made by one function reading `PackageGuard.get_risk`, so a preview and a build
+cannot answer differently. `PackageGuard.require_safe` still has the last word
+before anything is written: the manifest row is built from what `require_safe`
+**returned**, so the oracle's own reverting gate decides what may enter the
+manifest rather than merely commenting on it.
 
 | method | notes |
 |---|---|
-| `add_dependency(pkg)` | reverts unless the package passes score **and** flag policy |
-| `remove_dependency(pkg)` | anyone — removing is always the safe direction |
+| `add_dependency(pkg)` | writes the row, or returns `{ok: false, reason: "blocked by policy"}` and counts the refusal |
+| `remove_dependency(pkg)` | anyone, while the contract is open — removing is always the safe direction |
 | `check_risk(pkg)` | risk level as this consumer sees it; never raises |
 | `preview_dependency(pkg)` | the same decision, same code path, **degrades** instead of reverting |
 | `gate_build([pkg, …])` | the scenario in one call: PASS/FAIL for a whole dependency list |
 | `get_manifest()` / `has_dependency(pkg)` / `get_policy()` / `get_oracle_stats()` |  |
-| `set_policy(min_score, banned_flags, max_age)` / `set_oracle` / `freeze` | owner only; `freeze` is one-way |
+| `set_policy(min_score, banned_flags, max_age)` / `set_oracle` / `transfer_ownership` | owner only |
+| `freeze()` | owner only, one-way, and **total**: after it no public write succeeds |
+
+**A refusal is not a revert.** A package that fails the policy does not raise —
+it increments `blocked_attempts` and returns the refusal. That is the only way
+the counter can mean anything: a revert unwinds the whole call, so a counter
+bumped immediately before raising is rolled back with everything else and the
+contract silently forgets every request it turned down. Nothing after the
+increment can raise, and the static test in `test/test_logic.py` asserts that
+about the block itself rather than about line order.
+
+An **unreachable oracle is not a refusal** and is not counted — it raises.
+"the source was down" and "the package failed policy" are different answers, and
+filing the first under the second is how an availability failure becomes a
+permanent, wrong record.
+
+**Freeze means frozen.** After `freeze()` no public write succeeds — not
+`add_dependency`, not `remove_dependency`, not a policy, oracle or ownership
+change, and not a second `freeze()`. A guard on some mutators and not others
+would make a published manifest worth nothing to the person it is published for,
+so the guard is one method called from one place and a test enumerates every
+`@gl.public.write` out of the source to check none of them skips it.
 
 The consumer adds one rule of its own **on top of** the score: a banned flag
 blocks regardless of the number, because *"well maintained"* and *"safe to run in
@@ -207,18 +230,18 @@ contracts/
   _render_probe.py       throwaway diagnostic, deployed before anything else
 build/
   PackageGuard.min.py    the deployed artifact  (43,633 bytes)
-  PackageConsumer.min.py                        (14,124 bytes)
+  PackageConsumer.min.py                        (14,503 bytes)
 docs/
   PROBE.md               what validator egress actually sees — 11 findings
   DESIGN.md              why every decision is what it is
 test/
-  test_logic.py          310 offline tests, stdlib only
+  test_logic.py          389 offline tests, stdlib only
   fixtures.json          real packuments, rebuilt by tools/make_fixtures.py
 tools/
   make_fixtures.py       refetch fixtures from the live registry
   minify_contract.py     source -> deployable artifact
   e2e_studionet.sh       paced multi-package scan, respects the rate limiter
-  audit.sh               68 pre-submission checks, exits with the failure count
+  audit.sh               83 pre-submission checks, exits with the failure count
   deploy_bradbury.sh     the testnet deploy
 deployments.json         addresses, tx hashes, sha256 per artifact
 ```
@@ -378,20 +401,42 @@ matching that cannot affect an MIT package, so `lic` is 2 under both.)*
 
 ### Composability, exercised
 
-```
-$ genlayer write 0x0d9e9be2627B014eC78bD206d91dF24eC4B8d90d add_dependency --args express
-  -> OK, manifest_size 1
+Against the reviewed consumer at `0x96Db4DBE72892b788E311e33cEA8807d921ca960`:
 
-$ genlayer write ... add_dependency --args esbuild
-  -> REVERT: carries banned flag(s) INSTALL_SCRIPTS; it scores 80 but the
-             policy is not about the score alone
+```
+$ genlayer write 0x96Db4DBE72892b788E311e33cEA8807d921ca960 add_dependency --args express
+  -> {"ok":true,"status":"OK","manifest_size":1}
 
 $ genlayer write ... add_dependency --args flatmap-stream
-  -> REVERT: scores 30 (HIGH_RISK), below the required 50; flags:
-             NO_LICENSE,ABANDONED,SINGLE_MAINTAINER,PRERELEASE,LOW_ADOPTION,...
+  -> {"ok":false,"status":"BLOCKED","reason":"blocked by policy",
+      "detail":"scores 30, policy requires 50",
+      "overall_score":30,"blocked_attempts":1}
+
+$ genlayer write ... add_dependency --args esbuild
+  -> {"ok":false,"status":"BLOCKED","reason":"blocked by policy",
+      "detail":"carries banned flag(s): INSTALL_SCRIPTS",
+      "overall_score":80,"blocked_attempts":2}
 
 $ genlayer write ... add_dependency --args lodash
-  -> REVERT: no scan on record for lodash
+  -> {"ok":false,"status":"BLOCKED","reason":"blocked by policy",
+      "detail":"never scanned; call PackageGuard.request_scan",
+      "blocked_attempts":3}
+
+$ genlayer call ... get_policy
+  -> blocked_attempts: 3          # three refusals, three increments kept
+     manifest_size:    1
+
+$ genlayer write ... freeze
+  -> {"ok":true,"status":"OK","frozen":true}
+
+$ genlayer write ... remove_dependency --args express
+  -> ERROR: contract is frozen
+
+$ genlayer write ... add_dependency --args chalk
+  -> ERROR: contract is frozen
+
+$ genlayer call ... get_manifest
+  -> count: 1, package: express, frozen: true      # untouched
 ```
 
 **esbuild is the interesting one.** It scores 80 and is `SAFE` — a healthy,
@@ -465,7 +510,7 @@ somebody else's score rather than an oracle that derives its own.
 
 ```
 $ python3 test/test_logic.py
-Ran 310 tests in 0.5s
+Ran 389 tests in 0.7s
 OK
 ```
 
@@ -492,7 +537,7 @@ is that the deployed file is the same program.
 
 ```
 $ bash tools/audit.sh 0x1F3f51d9927490543519d6C61b9B544bf5caA7FB 0x0d9e9be2627B014eC78bD206d91dF24eC4B8d90d
-  68 passed, 0 failed
+  83 passed, 0 failed
 ```
 
 Every check runs; none is asserted. It covers lint on sources **and artifacts**,

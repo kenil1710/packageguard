@@ -7,7 +7,7 @@ network, no model, no genlayer install. stdlib only:
 
     python3 test/test_logic.py
 
-Four things are under test, not one.
+Five things are under test, not one.
 
 1. The pure logic in `contracts/PackageGuard.py`: ladders, the rubric, flags,
    levels, badges, name handling, the consensus rule, and every extraction
@@ -26,6 +26,17 @@ Four things are under test, not one.
    is the same program.
 
 4. PackageConsumer's pure logic, the same way.
+
+5. PackageConsumer's METHODS, actually executed. Sections 1-4 only ever ran the
+   pure region - every top-level function before the first class - which is
+   where the arithmetic lives but not where the two bugs Joaquin found lived.
+   `freeze()` not guarding `remove_dependency`, and `blocked_count` being
+   incremented on a path that then reverts, are both properties of a method
+   body, and no amount of testing helper functions would have caught either.
+   So `_deploy` below stands up a real instance against a fake PackageGuard -
+   storage fields, cross-contract views, message sender and all - and the
+   tests call `add_dependency`, `freeze` and `remove_dependency` the way a
+   transaction would. The same battery runs against the built artifact.
 
 The fixtures are chosen to span the rubric rather than to flatter it: express
 (healthy), left-pad (deprecated, still 1.9M installs a week), event-stream (the
@@ -73,6 +84,158 @@ def _offline(*_a, **_k):
     raise AssertionError("offline tests must not touch the network or a model")
 
 
+class _Address:
+    """gl's Address, as far as a contract can tell: comparable, hashable, and
+    carrying `.as_hex`."""
+
+    def __init__(self, raw: str = "0x" + "0" * 40):
+        self.as_hex = str(raw)
+
+    def __eq__(self, other):
+        return isinstance(other, _Address) and self.as_hex == other.as_hex
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    def __hash__(self):
+        return hash(self.as_hex)
+
+    def __repr__(self):
+        return "Address(" + self.as_hex + ")"
+
+
+def _uint(bits: int, name: str):
+    """u32/u64/u256. Int subclasses rather than bare `int`, so the range is
+    checked here instead of silently wrapping on-chain."""
+    hi = (1 << bits) - 1
+
+    class _U(int):
+        def __new__(cls, value=0):
+            n = int(value)
+            if n < 0 or n > hi:
+                raise OverflowError(name + " out of range: " + str(n))
+            return super().__new__(cls, n)
+
+    _U.__name__ = name
+    return _U
+
+
+class _Param:
+    """`DynArray[Dependency]` evaluated - the base plus its element types, kept
+    so storage can be allocated from the annotation the way GenVM does."""
+
+    def __init__(self, base, args):
+        self.base = base
+        self.args = args if isinstance(args, tuple) else (args,)
+
+
+class _DynArray(list):
+
+    def __init__(self, elem=None):
+        super().__init__()
+        self._elem = elem
+
+    def append_new_get(self):
+        item = _blank(self._elem)
+        self.append(item)
+        return item
+
+    @classmethod
+    def __class_getitem__(cls, item):
+        return _Param(cls, item)
+
+
+class _TreeMap(dict):
+
+    def get_or_insert_default(self, key):
+        if key not in self:
+            self[key] = None
+        return self[key]
+
+    @classmethod
+    def __class_getitem__(cls, item):
+        return _Param(cls, item)
+
+
+def _alloc(ann):
+    """The zero value GenVM gives a storage field of this declared type."""
+    if isinstance(ann, _Param):
+        if ann.base is _DynArray:
+            return _DynArray(ann.args[0])
+        return _TreeMap()
+    if ann is bool:
+        return False
+    if ann is str:
+        return ""
+    if ann is _Address:
+        return _Address()
+    if isinstance(ann, type) and issubclass(ann, int):
+        return ann(0)
+    return None
+
+
+def _blank(cls):
+    """A storage struct with every field at its zero value - what
+    `append_new_get()` hands back before anything is assigned to it."""
+    if cls is str:
+        return ""
+    obj = object.__new__(cls)
+    for field, ann in _annotations(cls).items():
+        setattr(obj, field, _alloc(ann))
+    return obj
+
+
+def _annotations(cls) -> dict:
+    out = {}
+    for klass in reversed(getattr(cls, "__mro__", [cls])):
+        out.update(dict(getattr(klass, "__annotations__", {}) or {}))
+    return out
+
+
+class _Public:
+    """`@gl.public.write`, `@gl.public.write.payable`, `@gl.public.view` - a
+    marker the tests can read back off the function."""
+
+    def __init__(self, kind: str):
+        self.kind = kind
+
+    def __call__(self, fn):
+        fn.__gl_public__ = self.kind
+        return fn
+
+
+# Address -> the object standing in for the contract deployed there. Tests put
+# a fake PackageGuard in here; an address that is absent behaves the way an
+# unreachable contract does.
+CONTRACTS = {}
+
+
+def _contract_interface(cls):
+    """`@gl.contract_interface`. At runtime the decorated class is a factory
+    taking an Address, whose `.view()` is the remote contract."""
+
+    class _Remote:
+        def __init__(self, addr):
+            self.key = str(getattr(addr, "as_hex", addr))
+
+        def view(self):
+            target = CONTRACTS.get(self.key)
+            if target is None:
+                raise RuntimeError("no contract deployed at " + self.key)
+            return target
+
+        def write(self, **_kw):
+            return self.view()
+
+    _Remote.__name__ = cls.__name__
+    return _Remote
+
+
+class _Contract:
+    """gl.Contract. Storage is allocated by `_deploy`, not here, because that
+    is where GenVM does it too - before __init__ runs."""
+
+
 def _install_stub() -> None:
     if "genlayer" in sys.modules:
         return
@@ -80,8 +243,56 @@ def _install_stub() -> None:
     vm = types.SimpleNamespace(UserError=_UserError)
     web = types.SimpleNamespace(request=_offline, render=_offline, get=_offline)
     nondet = types.SimpleNamespace(web=web, exec_prompt=_offline)
-    mod.gl = types.SimpleNamespace(vm=vm, nondet=nondet)
+    write = _Public("write")
+    write.payable = _Public("write.payable")
+    mod.gl = types.SimpleNamespace(
+        vm=vm,
+        nondet=nondet,
+        message=types.SimpleNamespace(sender_address=_Address(), value=0),
+        public=types.SimpleNamespace(write=write, view=_Public("view")),
+        contract_interface=_contract_interface,
+        Contract=_Contract,
+        contract_balance=0,
+    )
+    mod.Address = _Address
+    mod.u32 = _uint(32, "u32")
+    mod.u64 = _uint(64, "u64")
+    mod.u256 = _uint(256, "u256")
+    mod.DynArray = _DynArray
+    mod.TreeMap = _TreeMap
+    mod.allow_storage = lambda cls: cls
     sys.modules["genlayer"] = mod
+
+
+def load_contract(path: Path, name: str) -> types.ModuleType:
+    """Exec the WHOLE file, class bodies included, against the stub above -
+    so the methods can be called rather than merely parsed."""
+    module = types.ModuleType(name)
+    module.__file__ = str(path)
+    exec(compile(path.read_text(encoding="utf8"), str(path), "exec"),
+         module.__dict__)
+    return module
+
+
+def _deploy(cls, *args, sender=None):
+    """Construct a contract the way the VM does: allocate every declared
+    storage field to its zero value FIRST, then run __init__. The contract
+    never assigns `deps`, `present` or `log` itself - on-chain they simply
+    exist, and a harness that forgot that would not be testing the same
+    program."""
+    import genlayer as _g
+    obj = object.__new__(cls)
+    for field, ann in _annotations(cls).items():
+        setattr(obj, field, _alloc(ann))
+    _g.gl.message.sender_address = sender or _Address(OWNER)
+    obj.__init__(*args)
+    return obj
+
+
+OWNER = "0x" + "11" * 20
+STRANGER = "0x" + "22" * 20
+ORACLE_AT = "0x" + "33" * 20
+ELSEWHERE = "0x" + "44" * 20
 
 
 def load(path: Path, name: str) -> types.ModuleType:
@@ -1822,6 +2033,627 @@ class TestConsumer(unittest.TestCase):
                          M._norm_package("@babel/core"))
         with self.assertRaises(Exception):
             self.C._norm_package("../etc")
+
+
+# --------------------------------------------------------------------------
+# 16. PackageConsumer, actually executed
+#
+# Both bugs in the review live in method bodies, so this section runs method
+# bodies. A fake PackageGuard sits at ORACLE_AT returning the same shape the
+# real one's _view() does, and every test below drives the contract the way a
+# transaction would.
+# --------------------------------------------------------------------------
+
+def _now_ts() -> int:
+    from datetime import datetime, timezone
+    return int(datetime.now(timezone.utc).timestamp())
+
+
+def _record(name, overall, flags=(), age=0, version="1.0.0", score_id=1):
+    """One row of PackageGuard's get_risk output, as PackageConsumer reads it."""
+    if overall >= 70:
+        level = "SAFE"
+    elif overall >= 40:
+        level = "MODERATE"
+    else:
+        level = "HIGH_RISK"
+    return {
+        "found": True,
+        "package": name,
+        "score_id": score_id,
+        "latest_version": version,
+        "overall_score": overall,
+        "risk_level": level,
+        "badge": "TRUSTED" if overall >= 85 else "REVIEW",
+        "risk_flags": list(flags),
+        "content_hash": "162:16effac907d8a715",
+        "scanned_at": _now_ts() - age,
+    }
+
+
+class FakeGuard:
+    """A stand-in PackageGuard. `require_safe` raises exactly where the real one
+    does, so the consumer is tested against the interface it actually meets."""
+
+    def __init__(self):
+        self.records = {}
+        self.calls = []
+
+    def add(self, name, **kw):
+        self.records[name] = _record(name, **kw)
+        return self
+
+    def get_risk(self, package_name):
+        self.calls.append(("get_risk", package_name))
+        rec = self.records.get(package_name)
+        if rec is None:
+            return {"found": False, "package": package_name}
+        return json.loads(json.dumps(rec))
+
+    def require_safe(self, package_name, min_score):
+        self.calls.append(("require_safe", package_name))
+        rec = self.records.get(package_name)
+        if rec is None:
+            raise _UserError("[EXPECTED] " + package_name + " has never been "
+                             "scanned")
+        if int(rec["overall_score"]) < int(min_score):
+            raise _UserError("[EXPECTED] " + package_name + " scores "
+                             + str(rec["overall_score"]))
+        return json.loads(json.dumps(rec))
+
+    def is_safe(self, package_name, min_score):
+        rec = self.records.get(package_name)
+        return rec is not None and int(rec["overall_score"]) >= int(min_score)
+
+    def get_stats(self):
+        return {"total_scanned": len(self.records)}
+
+    def get_config(self):
+        return {"fee_wei": 0}
+
+
+class DeadGuard:
+    """An oracle that is there in name only - every read fails."""
+
+    def get_risk(self, package_name):
+        raise RuntimeError("connection reset")
+
+    def require_safe(self, package_name, min_score):
+        raise RuntimeError("connection reset")
+
+    def get_stats(self):
+        raise RuntimeError("connection reset")
+
+
+def _public_writes(path: Path) -> set:
+    """Every @gl.public.write in a contract file, by name. Reading them off the
+    source rather than listing them here is what makes the freeze test fail the
+    day somebody adds a mutator and forgets the guard."""
+    tree = ast.parse(path.read_text(encoding="utf8"))
+    out = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        for dec in node.decorator_list:
+            if "gl.public.write" in ast.unparse(dec):
+                out.add(node.name)
+    return out
+
+
+def _behaviour_suite(path: Path, label: str):
+    """The executed-contract battery, run against a contract FILE - the source
+    and the built artifact both have to pass it."""
+
+    class TestBehaviour(unittest.TestCase):
+
+        @classmethod
+        def setUpClass(cls):
+            if not path.exists():
+                raise unittest.SkipTest(str(path) + " not built yet")
+            cls.mod = load_contract(path, "exec_" + label)
+
+        def setUp(self):
+            import genlayer as _g
+            self.gl = _g.gl
+            self.guard = FakeGuard()
+            self.guard.add("express", overall=85)
+            self.guard.add("chalk", overall=80)
+            self.guard.add("flatmap-stream", overall=15)
+            self.guard.add("esbuild", overall=80, flags=["INSTALL_SCRIPTS"])
+            self.guard.add("left-pad", overall=65, flags=["DEPRECATED"])
+            self.guard.add("ancient", overall=90, age=800_000)
+            CONTRACTS.clear()
+            CONTRACTS[ORACLE_AT] = self.guard
+            self.c = _deploy(self.mod.PackageConsumer, ORACLE_AT)
+
+        def tearDown(self):
+            CONTRACTS.clear()
+
+        def _as(self, who):
+            self.gl.message.sender_address = self.mod.Address(who)
+
+        # --- FIX 1: freeze must stop every mutation
+
+        def test_freeze_then_remove_dependency_is_refused(self):
+            """Joaquin's first bug, exactly: the manifest called itself
+            immutable and remove_dependency did not check."""
+            self.c.add_dependency("express")
+            self.c.freeze()
+            with self.assertRaises(_UserError):
+                self.c.remove_dependency("express")
+            self.assertTrue(self.c.has_dependency("express"))
+            self.assertEqual(self.c.get_manifest()["count"], 1)
+
+        def test_freeze_then_add_dependency_is_refused(self):
+            self.c.freeze()
+            with self.assertRaises(_UserError):
+                self.c.add_dependency("express")
+            self.assertEqual(self.c.get_manifest()["count"], 0)
+
+        def test_freeze_refuses_every_public_write(self):
+            """Enumerated from the source, not from a hand-kept list: a new
+            mutator that skips the guard fails here rather than in review."""
+            self.c.add_dependency("express")
+            self.c.freeze()
+            attempts = {
+                "add_dependency": lambda: self.c.add_dependency("chalk"),
+                "remove_dependency":
+                    lambda: self.c.remove_dependency("express"),
+                "set_policy": lambda: self.c.set_policy(60, "DEPRECATED", 3600),
+                "set_oracle": lambda: self.c.set_oracle(ELSEWHERE),
+                "freeze": lambda: self.c.freeze(),
+                "transfer_ownership":
+                    lambda: self.c.transfer_ownership(ELSEWHERE),
+            }
+            self.assertEqual(set(attempts), _public_writes(path))
+            for name, call in attempts.items():
+                with self.subTest(write=name):
+                    with self.assertRaises(_UserError):
+                        call()
+
+        def test_freeze_leaves_the_manifest_exactly_as_it_was(self):
+            self.c.add_dependency("express")
+            self.c.add_dependency("chalk")
+            before = self.c.get_manifest()
+            self.c.freeze()
+            for call in (lambda: self.c.remove_dependency("express"),
+                         lambda: self.c.add_dependency("left-pad")):
+                with self.assertRaises(_UserError):
+                    call()
+            self.assertEqual(self.c.get_manifest()["dependencies"],
+                             before["dependencies"])
+
+        def test_freezing_twice_is_refused(self):
+            self.c.freeze()
+            with self.assertRaises(_UserError):
+                self.c.freeze()
+            self.assertTrue(self.c.get_policy()["frozen"])
+
+        def test_remove_works_before_the_freeze(self):
+            self.c.add_dependency("express")
+            out = self.c.remove_dependency("express")
+            self.assertTrue(out["ok"])
+            self.assertFalse(self.c.has_dependency("express"))
+
+        def test_freeze_is_owner_only(self):
+            self._as(STRANGER)
+            with self.assertRaises(_UserError):
+                self.c.freeze()
+            self.assertFalse(self.c.get_policy()["frozen"])
+
+        # --- FIX 2: a blocked attempt must survive as a count
+
+        def test_blocked_attempt_increments_the_counter(self):
+            """Joaquin's second bug: the increment used to be rolled back by the
+            revert that followed it, so blocked_attempts stayed at zero
+            forever."""
+            self.assertEqual(self.c.get_policy()["blocked_attempts"], 0)
+            out = self.c.add_dependency("flatmap-stream")
+            self.assertFalse(out["ok"])
+            self.assertEqual(out["reason"], "blocked by policy")
+            self.assertEqual(self.c.get_policy()["blocked_attempts"], 1)
+
+        def test_blocked_attempt_does_not_raise(self):
+            out = self.c.add_dependency("flatmap-stream")
+            self.assertEqual(out["status"], "BLOCKED")
+            self.assertEqual(out["verdict"], "BLOCK")
+
+        def test_blocked_attempts_accumulate(self):
+            for name in ("flatmap-stream", "esbuild", "left-pad", "unknown-pkg",
+                         "ancient"):
+                self.assertFalse(self.c.add_dependency(name)["ok"], name)
+            self.assertEqual(self.c.get_policy()["blocked_attempts"], 5)
+
+        def test_a_banned_flag_is_counted_even_at_a_high_score(self):
+            out = self.c.add_dependency("esbuild")
+            self.assertFalse(out["ok"])
+            self.assertIn("INSTALL_SCRIPTS", out["detail"])
+            self.assertEqual(out["overall_score"], 80)
+            self.assertEqual(self.c.get_policy()["blocked_attempts"], 1)
+
+        def test_a_never_scanned_package_is_counted(self):
+            out = self.c.add_dependency("lodash")
+            self.assertFalse(out["ok"])
+            self.assertIn("never scanned", out["detail"])
+            self.assertEqual(self.c.get_policy()["blocked_attempts"], 1)
+
+        def test_a_stale_score_is_counted(self):
+            out = self.c.add_dependency("ancient")
+            self.assertFalse(out["ok"])
+            self.assertIn("old", out["detail"])
+            self.assertEqual(self.c.get_policy()["blocked_attempts"], 1)
+
+        def test_a_blocked_package_never_enters_the_manifest(self):
+            self.c.add_dependency("flatmap-stream")
+            self.assertFalse(self.c.has_dependency("flatmap-stream"))
+            self.assertEqual(self.c.get_manifest()["count"], 0)
+
+        def test_the_refusal_is_written_to_the_log(self):
+            self.c.add_dependency("flatmap-stream")
+            entries = self.c.get_log(0)["entries"]
+            self.assertTrue(any("blocked" in e for e in entries), entries)
+
+        def test_an_allowed_package_is_added_and_not_counted(self):
+            out = self.c.add_dependency("express")
+            self.assertTrue(out["ok"])
+            self.assertEqual(out["added"]["overall_score"], 85)
+            self.assertEqual(self.c.get_policy()["blocked_attempts"], 0)
+            self.assertTrue(self.c.has_dependency("express"))
+
+        def test_the_counter_survives_a_later_successful_add(self):
+            self.c.add_dependency("flatmap-stream")
+            self.c.add_dependency("express")
+            self.assertEqual(self.c.get_policy()["blocked_attempts"], 1)
+            self.assertEqual(self.c.get_manifest()["count"], 1)
+
+        # --- the distinction the counter depends on
+
+        def test_an_unreachable_oracle_raises_and_is_not_counted(self):
+            """An availability failure is not a verdict about the package. It
+            must fail the call rather than be filed as a refusal."""
+            CONTRACTS[ORACLE_AT] = DeadGuard()
+            with self.assertRaises(_UserError):
+                self.c.add_dependency("express")
+            CONTRACTS[ORACLE_AT] = self.guard
+            self.assertEqual(self.c.get_policy()["blocked_attempts"], 0)
+
+        def test_a_missing_oracle_raises_and_is_not_counted(self):
+            self.c.set_oracle(ELSEWHERE)
+            with self.assertRaises(_UserError):
+                self.c.add_dependency("express")
+            self.c.set_oracle(ORACLE_AT)
+            self.assertEqual(self.c.get_policy()["blocked_attempts"], 0)
+
+        def test_the_read_paths_still_degrade_when_the_oracle_is_down(self):
+            CONTRACTS[ORACLE_AT] = DeadGuard()
+            got = self.c.preview_dependency("express")
+            self.assertFalse(got["allowed"])
+            self.assertTrue(got["oracle_error"])
+            self.assertIn("unreachable", got["reason"])
+
+        # --- the preview and the gate cannot disagree
+
+        def test_preview_matches_what_add_dependency_does(self):
+            for name in ("express", "chalk", "flatmap-stream", "esbuild",
+                         "left-pad", "ancient", "lodash"):
+                with self.subTest(package=name):
+                    predicted = self.c.preview_dependency(name)["allowed"]
+                    self.assertEqual(self.c.add_dependency(name)["ok"],
+                                     predicted)
+
+        def test_gate_build_matches_add_dependency(self):
+            names = ["express", "flatmap-stream", "esbuild"]
+            gate = self.c.gate_build(names)
+            self.assertEqual(gate["build"], "FAIL")
+            for row in gate["results"]:
+                with self.subTest(package=row["package"]):
+                    self.assertEqual(
+                        self.c.add_dependency(row["package"])["ok"],
+                        row["allowed"])
+
+        def test_require_safe_is_what_writes_the_row(self):
+            """The oracle's own gate is load-bearing: it is called on the path
+            that writes, and never on the path that refuses."""
+            self.c.add_dependency("flatmap-stream")
+            self.assertNotIn("require_safe",
+                             [c[0] for c in self.guard.calls])
+            self.c.add_dependency("express")
+            self.assertIn(("require_safe", "express"), self.guard.calls)
+
+        # --- ordinary behaviour, so the fixes are not load-bearing alone
+
+        def test_a_bad_name_still_raises(self):
+            with self.assertRaises(_UserError):
+                self.c.add_dependency("../etc/passwd")
+            self.assertEqual(self.c.get_policy()["blocked_attempts"], 0)
+
+        def test_removing_something_absent_raises(self):
+            with self.assertRaises(_UserError):
+                self.c.remove_dependency("express")
+
+        def test_re_adding_updates_in_place(self):
+            self.c.add_dependency("express")
+            self.c.add_dependency("express")
+            self.assertEqual(self.c.get_manifest()["count"], 1)
+
+        def test_remove_keeps_the_other_rows(self):
+            for name in ("express", "chalk"):
+                self.c.add_dependency(name)
+            self.c.remove_dependency("express")
+            rows = self.c.get_manifest()["dependencies"]
+            self.assertEqual([r["package"] for r in rows], ["chalk"])
+
+        def test_set_policy_is_owner_only(self):
+            self._as(STRANGER)
+            with self.assertRaises(_UserError):
+                self.c.set_policy(90, "", 3600)
+
+        def test_a_tighter_policy_blocks_what_used_to_pass(self):
+            self.assertTrue(self.c.add_dependency("chalk")["ok"])
+            self.c.set_policy(90, "", 604800)
+            out = self.c.add_dependency("chalk")
+            self.assertFalse(out["ok"])
+            self.assertEqual(self.c.get_policy()["blocked_attempts"], 1)
+
+        def test_get_oracle_stats_reaches_the_oracle(self):
+            self.assertEqual(self.c.get_oracle_stats()["total_scanned"], 6)
+
+    TestBehaviour.__name__ = "TestBehaviour_" + label
+    TestBehaviour.__qualname__ = TestBehaviour.__name__
+    return TestBehaviour
+
+
+TestConsumerBehaviour = _behaviour_suite(CONSUMER, "pc_src")
+TestConsumerArtifactBehaviour = _behaviour_suite(CONSUMER_ARTIFACT, "pc_min")
+
+
+# --------------------------------------------------------------------------
+# 17. static guards against the two bugs coming back
+# --------------------------------------------------------------------------
+
+def _static_guards(path: Path, label: str):
+
+    class TestGuards(unittest.TestCase):
+
+        @classmethod
+        def setUpClass(cls):
+            if not path.exists():
+                raise unittest.SkipTest(str(path) + " not built yet")
+            cls.tree = ast.parse(path.read_text(encoding="utf8"))
+
+        def _body(self, name):
+            for node in ast.walk(self.tree):
+                if isinstance(node, ast.FunctionDef) and node.name == name:
+                    return node
+            self.fail("no such method: " + name)
+
+        def test_every_public_write_checks_frozen(self):
+            writes = _public_writes(path)
+            self.assertGreaterEqual(len(writes), 6)
+            for name in writes:
+                with self.subTest(write=name):
+                    self.assertIn("self._require_unfrozen()",
+                                  ast.unparse(self._body(name)))
+
+        def test_the_frozen_guard_raises(self):
+            self.assertIn("raise",
+                          ast.unparse(self._body("_require_unfrozen")))
+
+        def test_nothing_raises_after_the_blocked_counter_moves(self):
+            """The shape of the bug, stated so it cannot come back.
+
+            Control flow, not line order: the block that increments the counter
+            must contain no `raise` at any depth and must end in a `return`, so
+            there is no path from the increment to a revert that would unwind
+            it."""
+            fn = self._body("add_dependency")
+            blocks = []
+            for node in ast.walk(fn):
+                for field in ("body", "orelse", "finalbody"):
+                    block = getattr(node, field, None)
+                    if not isinstance(block, list):
+                        continue
+                    if any(isinstance(st, ast.Assign) and "self.blocked_count"
+                           in ast.unparse(st.targets[0]) for st in block):
+                        blocks.append(block)
+            self.assertEqual(len(blocks), 1, "expected exactly one increment")
+            block = blocks[0]
+            for st in block:
+                for sub in ast.walk(st):
+                    self.assertNotIsInstance(sub, ast.Raise)
+            self.assertIsInstance(block[-1], ast.Return)
+
+        def test_the_refusal_is_returned_not_raised(self):
+            fn = self._body("add_dependency")
+            text = ast.unparse(fn)
+            self.assertIn("'blocked by policy'", text)
+            self.assertIn("'ok': False", text)
+
+        def test_an_unreachable_oracle_is_not_a_refusal(self):
+            fn = self._body("add_dependency")
+            text = ast.unparse(fn)
+            self.assertIn("oracle_error", text)
+
+    TestGuards.__name__ = "TestGuards_" + label
+    TestGuards.__qualname__ = TestGuards.__name__
+    return TestGuards
+
+
+TestConsumerGuards = _static_guards(CONSUMER, "pc_src")
+TestConsumerArtifactGuards = _static_guards(CONSUMER_ARTIFACT, "pc_min")
+
+
+# --------------------------------------------------------------------------
+# 18. the same bug class, swept across BOTH contracts
+#
+# `blocked_count += 1` immediately before a revert was one instance of a
+# general shape: state written on a path that then raises is state the chain
+# never keeps. Rather than fix the one instance and hope, this walks every
+# public write in both contracts looking for any storage assignment with a
+# reachable `raise` after it.
+# --------------------------------------------------------------------------
+
+_TERMINATED = object()
+
+
+def _is_storage_write(node) -> bool:
+    if isinstance(node, ast.Assign):
+        return any(ast.unparse(t).startswith("self.") for t in node.targets)
+    if isinstance(node, ast.AugAssign):
+        return ast.unparse(node.target).startswith("self.")
+    if isinstance(node, ast.Delete):
+        return any(ast.unparse(t).startswith("self.") for t in node.targets)
+    return False
+
+
+def _sub_blocks(node):
+    """The statement lists nested directly in this statement. Nested function
+    definitions are scopes of their own and are not part of this path."""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return []
+    out = []
+    for field in ("body", "orelse", "finalbody"):
+        block = getattr(node, field, None)
+        if isinstance(block, list) and block:
+            out.append(block)
+    for handler in getattr(node, "handlers", []) or []:
+        out.append(handler.body)
+    return out
+
+
+def revert_after_write(path: Path) -> list:
+    """(method, write_line, raise_line) for every storage write with a `raise`
+    reachable after it on the same path."""
+    hits = []
+
+    def walk(block, written, method):
+        w = written
+        for st in block:
+            if isinstance(st, ast.Raise):
+                if w is not None:
+                    hits.append((method, w, st.lineno))
+                return _TERMINATED
+            if isinstance(st, ast.Return):
+                return _TERMINATED
+            if _is_storage_write(st):
+                w = st.lineno
+                continue
+            for sub in _sub_blocks(st):
+                got = walk(sub, w, method)
+                if got is not _TERMINATED and got is not None:
+                    w = got
+        return w
+
+    tree = ast.parse(path.read_text(encoding="utf8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        if not any("gl.public.write" in ast.unparse(d)
+                   for d in node.decorator_list):
+            continue
+        walk(node.body, None, node.name)
+    return hits
+
+
+class TestNoRevertAfterAWrite(unittest.TestCase):
+    """The generalised form of the second review finding."""
+
+    def test_the_oracle_source(self):
+        self.assertEqual(revert_after_write(SOURCE), [])
+
+    def test_the_oracle_artifact(self):
+        if not ARTIFACT.exists():
+            self.skipTest("not built")
+        self.assertEqual(revert_after_write(ARTIFACT), [])
+
+    def test_the_consumer_source(self):
+        self.assertEqual(revert_after_write(CONSUMER), [])
+
+    def test_the_consumer_artifact(self):
+        if not CONSUMER_ARTIFACT.exists():
+            self.skipTest("not built")
+        self.assertEqual(revert_after_write(CONSUMER_ARTIFACT), [])
+
+    def test_the_checker_catches_the_bug_it_was_written_for(self):
+        """A detector nobody has seen fail is not a detector."""
+        import tempfile
+        bad = ("class C(gl.Contract):\n"
+               "    @gl.public.write\n"
+               "    def add(self, x: int) -> None:\n"
+               "        self.blocked = 1\n"
+               "        raise gl.vm.UserError('nope')\n")
+        with tempfile.NamedTemporaryFile("w", suffix=".py",
+                                         delete=False) as fh:
+            fh.write(bad)
+            tmp = Path(fh.name)
+        try:
+            self.assertEqual(len(revert_after_write(tmp)), 1)
+        finally:
+            tmp.unlink()
+
+    def test_the_checker_does_not_flag_a_disjoint_branch(self):
+        """A raise on a branch the write never reaches is not the bug."""
+        import tempfile
+        fine = ("class C(gl.Contract):\n"
+                "    @gl.public.write\n"
+                "    def add(self, x: int) -> None:\n"
+                "        if x < 0:\n"
+                "            self.blocked = 1\n"
+                "            return None\n"
+                "        raise gl.vm.UserError('nope')\n")
+        with tempfile.NamedTemporaryFile("w", suffix=".py",
+                                         delete=False) as fh:
+            fh.write(fine)
+            tmp = Path(fh.name)
+        try:
+            self.assertEqual(revert_after_write(tmp), [])
+        finally:
+            tmp.unlink()
+
+
+class TestOracleGovernanceIsTotal(unittest.TestCase):
+    """freeze()'s counterpart on the oracle side. `paused` deliberately claims
+    LESS than freeze does - it halts new scans and nothing else - so the test
+    is that it covers exactly the method that scans, and that no other write
+    can reach a score."""
+
+    def test_pause_guards_the_scanning_path(self):
+        source = SOURCE.read_text(encoding="utf8")
+        start = source.find("def request_scan(")
+        end = source.find("    # --- reads", start)
+        self.assertIn("if self.paused:", source[start:end])
+
+    def test_no_other_public_write_touches_a_score(self):
+        tree = ast.parse(SOURCE.read_text(encoding="utf8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            if not any("gl.public.write" in ast.unparse(d)
+                       for d in node.decorator_list):
+                continue
+            if node.name == "request_scan":
+                continue
+            body = ast.unparse(node)
+            for field in ("self.feeds", "self.board", "self.packages",
+                          "self.level_counts", "self.flag_counts",
+                          "self.next_id", "self.sum_", "self.total_scanned"):
+                self.assertNotIn(field, body, node.name + " -> " + field)
+
+    def test_every_public_write_on_the_oracle_is_owner_gated_or_a_pull(self):
+        """The two ungated writes are request_scan (the product) and
+        claim_refund (other people's money, which an owner gate would trap)."""
+        source = SOURCE.read_text(encoding="utf8")
+        tree = ast.parse(source)
+        ungated = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            if not any("gl.public.write" in ast.unparse(d)
+                       for d in node.decorator_list):
+                continue
+            if "self._only_owner()" not in ast.unparse(node):
+                ungated.add(node.name)
+        self.assertEqual(ungated, {"request_scan", "claim_refund"})
 
 
 if __name__ == "__main__":

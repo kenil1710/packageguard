@@ -19,10 +19,11 @@
       "source_sha256": "ab192e10364cef77e0c07721c5b43929fe45951610470939edacbb3ae23f2743"
     },
     "build/PackageConsumer.min.py": {
-      "sha256": "db7036b685bf7798deb015f40a9f9aad7c2e0994772c31e41710cc39b6ad2096",
-      "bytes": 14124,
+      "sha256": "aed9d3d308b57ce5b3da33eb4610240472315073da2c729317d14c8610c461d6",
+      "bytes": 14503,
       "source": "contracts/PackageConsumer.py",
-      "source_sha256": "e3f271b8f21e2044067904217009760c9fcca4cf028b2040dcc8c649a0ab6424"
+      "source_sha256": "96f6659135e132bbc9addcb2a2b79b39cd0b38e6a8005f8f9506898750ad9486",
+      "revision": "rev2 - review fixes: freeze() now refuses every public write, and a policy refusal returns {ok: false} and keeps the blocked_attempts increment instead of reverting it"
     }
   },
   "deployments": {
@@ -38,12 +39,18 @@
         "fee_note": "fee_wei set to 0 on this demo deployment. The genlayer CLI hardcodes value: 0n on writes, so there is no way to attach payable value from the command line; the fee path is exercised in the offline suite instead. DEFAULT_FEE_WEI is 0.01 GEN in the source."
       },
       "PackageConsumer": {
-        "address": "0x0d9e9be2627B014eC78bD206d91dF24eC4B8d90d",
-        "tx": "0x85073bee526398e893a18d94affb974efad479792ada1b580ddcb152aa30a554",
+        "address": "0x96Db4DBE72892b788E311e33cEA8807d921ca960",
+        "tx": "0x5e0aa41039cdd336f7a78b030da6a9c0fb28e79a810979afdf6a0ba30e20ec27",
         "artifact": "build/PackageConsumer.min.py",
-        "constructor_args": [
-          "0x1F3f51d9927490543519d6C61b9B544bf5caA7FB"
-        ]
+        "sha256": "aed9d3d308b57ce5b3da33eb4610240472315073da2c729317d14c8610c461d6",
+        "verified": "genlayer code 0x96Db4DBE72892b788E311e33cEA8807d921ca960 is byte-identical to build/PackageConsumer.min.py (14,503 bytes), sha256 aed9d3d308b57ce5b3da33eb4610240472315073da2c729317d14c8610c461d6, checked after deployment",
+        "oracle": "0x1F3f51d9927490543519d6C61b9B544bf5caA7FB",
+        "revision": "rev2, the reviewed build. The oracle was NOT redeployed - PackageGuard is unchanged and this consumer points at the same address.",
+        "review_fixes_verified_live": {
+          "freeze_then_remove_dependency": "refused; get_manifest still reports count 1 and frozen true",
+          "freeze_then_add_dependency": "refused; manifest unchanged",
+          "blocked_attempts_survives": "three refused adds (flatmap-stream below the bar, esbuild INSTALL_SCRIPTS, lodash never scanned) took get_policy.blocked_attempts from 0 to 3; each returned {\"ok\":false,\"reason\":\"blocked by policy\"} rather than reverting"
+        }
       },
       "render_probe": {
         "address": "0xAA236cC1Cd182879915E90DAc796D94d6bc32C90",
@@ -53,6 +60,15 @@
       "superseded": {
         "address": "0x79279ab1d4Ce78cB2481cb9Ed34c8B6C9A6d053c",
         "why": "first deploy, replaced after a licence-prefix-matching tightening. Kept in the record because express was scanned on BOTH, and the two rounds are the determinism evidence in the README."
+      },
+      "superseded_PackageConsumer": {
+        "address": "0x0d9e9be2627B014eC78bD206d91dF24eC4B8d90d",
+        "tx": "0x85073bee526398e893a18d94affb974efad479792ada1b580ddcb152aa30a554",
+        "artifact": "build/PackageConsumer.min.py",
+        "constructor_args": [
+          "0x1F3f51d9927490543519d6C61b9B544bf5caA7FB"
+        ],
+        "why": "rev1. Superseded by 0x96Db4DBE72892b788E311e33cEA8807d921ca960 after review: freeze() did not guard remove_dependency, and blocked_count was incremented immediately before a revert, so the increment was rolled back and blocked_attempts never left zero. Kept in the record because the transactions quoted in the README were made against it."
       }
     },
     "testnet-bradbury": {
@@ -73,7 +89,9 @@
         "artifact": "build/PackageConsumer.min.py",
         "constructor_args": [
           "0x4f35Fd3D93bDb8446C3ccf715B684222D93BB8fE"
-        ]
+        ],
+        "status": "rev1, pending redeploy of build/PackageConsumer.min.py rev2 (sha256 aed9d3d308b57ce5b3da33eb4610240472315073da2c729317d14c8610c461d6). PackageGuard at 0x4f35Fd3D93bDb8446C3ccf715B684222D93BB8fE is unchanged and stays as deployed.",
+        "redeploy_command": "genlayer network set testnet-bradbury && genlayer deploy --contract build/PackageConsumer.min.py --args 0x4f35Fd3D93bDb8446C3ccf715B684222D93BB8fE"
       }
     }
   },
