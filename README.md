@@ -241,7 +241,7 @@ tools/
   make_fixtures.py       refetch fixtures from the live registry
   minify_contract.py     source -> deployable artifact
   e2e_studionet.sh       paced multi-package scan, respects the rate limiter
-  audit.sh               83 pre-submission checks, exits with the failure count
+  audit.sh               84 pre-submission checks, exits with the failure count
   deploy_bradbury.sh     the testnet deploy
 deployments.json         addresses, tx hashes, sha256 per artifact
 ```
@@ -272,18 +272,37 @@ bash tools/e2e_studionet.sh <oracle-address> express left-pad event-stream
 | contract | Bradbury testnet | Studionet |
 |---|---|---|
 | **PackageGuard** | `0x4f35Fd3D93bDb8446C3ccf715B684222D93BB8fE` | `0x1F3f51d9927490543519d6C61b9B544bf5caA7FB` |
-| **PackageConsumer** | `0x76B22B4aDcfBe55Bc639d8FaE42C4B5Cb41780a4` | `0x0d9e9be2627B014eC78bD206d91dF24eC4B8d90d` |
+| **PackageConsumer** | `0xcDEAD088A846309a7F3c39477101b90772940D25` | `0x96Db4DBE72892b788E311e33cEA8807d921ca960` |
 | render probe (throwaway) | — | `0xAA236cC1Cd182879915E90DAc796D94d6bc32C90` |
 
+Both consumers are the **reviewed build**. PackageGuard was not redeployed — it
+is unchanged by the review fixes, and each consumer points at the oracle that
+was already there. The rev1 consumers
+(`0x76B22B4aDcfBe55Bc639d8FaE42C4B5Cb41780a4` on Bradbury,
+`0x0d9e9be2627B014eC78bD206d91dF24eC4B8d90d` on Studionet) are kept in
+`deployments.json` because earlier transcripts were taken against them.
+
 **One artifact, both networks.** The deployed source on each is byte-identical to
-`build/PackageGuard.min.py`, and to the other:
+its artifact, and to the other:
 
 ```
 $ genlayer code 0x4f35Fd3D93bDb8446C3ccf715B684222D93BB8fE | diff - build/PackageGuard.min.py
 $ genlayer code 0x1F3f51d9927490543519d6C61b9B544bf5caA7FB | diff - build/PackageGuard.min.py
 $ shasum -a 256 build/PackageGuard.min.py
 56fd5144a97d489445c0de0cddcf7431c1139d58d485c8e97e2908640ecb3a4e
+
+$ genlayer code 0xcDEAD088A846309a7F3c39477101b90772940D25 | diff - build/PackageConsumer.min.py
+$ genlayer code 0x96Db4DBE72892b788E311e33cEA8807d921ca960 | diff - build/PackageConsumer.min.py
+$ shasum -a 256 build/PackageConsumer.min.py
+aed9d3d308b57ce5b3da33eb4610240472315073da2c729317d14c8610c461d6
 ```
+
+The Bradbury consumer is verified read-only: source identity, wiring
+(`get_policy` reports the right oracle, `get_oracle_stats` reads it
+cross-contract), and the full decision path through `gate_build`. The
+write-path evidence below — `blocked_attempts` surviving three refusals, and
+`freeze()` then `remove_dependency` — was taken on Studionet against the
+byte-identical artifact, because `freeze()` is one-way.
 
 ### The same package, the same hash, two validator sets
 
@@ -536,8 +555,8 @@ is that the deployed file is the same program.
 ## Pre-submission audit
 
 ```
-$ bash tools/audit.sh 0x1F3f51d9927490543519d6C61b9B544bf5caA7FB 0x0d9e9be2627B014eC78bD206d91dF24eC4B8d90d
-  83 passed, 0 failed
+$ bash tools/audit.sh 0x1F3f51d9927490543519d6C61b9B544bf5caA7FB 0x96Db4DBE72892b788E311e33cEA8807d921ca960 exercised
+  84 passed, 0 failed
 ```
 
 Every check runs; none is asserted. It covers lint on sources **and artifacts**,
@@ -548,6 +567,13 @@ full method surface, and the live deployment — that `genlayer code <address>`
 diffs clean against `build/PackageGuard.min.py`, that `verify_risk` returns true,
 that `require_safe` reverts, and that the consumer reads the oracle
 cross-contract. It exits with the failure count, so it works as a CI gate.
+
+Group 3b exists because of the review. Both findings are checked mechanically
+over the source **and** the deployed artifact: every `@gl.public.write` carries
+the frozen guard, a refusal is returned rather than raised, and **no storage
+write in either contract has a reachable `raise` after it**. One check runs the
+new tests against the *pre-fix* contract and fails if they pass — a regression
+test nobody has watched fail is not a regression test.
 
 Full output and the limitations stated rather than hidden:
 [`docs/AUDIT.md`](docs/AUDIT.md).

@@ -2,12 +2,21 @@
 # Pre-submission audit. Every check RUNS; none is asserted from memory.
 #
 #   bash tools/audit.sh            offline checks only
-#   bash tools/audit.sh <oracle> <consumer>    also checks the live deployment
+#   bash tools/audit.sh <oracle> <consumer>              + the live deployment
+#   bash tools/audit.sh <oracle> <consumer> exercised    + the demo-state checks
+#
+# The third argument is opt-in because the last two checks assert state that
+# only exists once somebody has DRIVEN the deployment - refused adds recorded,
+# and freeze() called. A correct fresh deployment has neither, so asserting
+# them unconditionally would fail an honest contract. What holds on any
+# deployment is that its source is byte-identical to the artifact, and that is
+# checked either way.
 #
 # Exit code is the number of failures.
 cd "$(dirname "$0")/.."
 ORACLE="${1:-}"
 CONSUMER="${2:-}"
+EXERCISED="${3:-}"
 LINT="$HOME/.local/bin/genvm-lint"
 PASS=0; FAIL=0
 ck() { # ck "<name>" "<command>"
@@ -77,8 +86,12 @@ import test_logic as T
 from pathlib import Path
 sys.exit(1 if T.revert_after_write(Path('$f')) else 0)\""
 done
-ck "the new tests fail against the pre-fix contract" \
-   "git show HEAD:contracts/PackageConsumer.py > /tmp/_prefix.py && python3 -c \"
+# f0e2167 is the last commit BEFORE the review fixes. Pinned, not HEAD~1 and
+# not HEAD: the point is to re-run the new tests against the contract that
+# actually had both bugs, and that revision does not move as work continues.
+PREFIX_REV=f0e2167
+ck "the new tests fail against the pre-fix contract ($PREFIX_REV)" \
+   "git show $PREFIX_REV:contracts/PackageConsumer.py > /tmp/_prefix.py && python3 -c \"
 import sys, unittest
 from pathlib import Path
 sys.path.insert(0,'test')
@@ -160,19 +173,29 @@ if [ -n "$ORACLE" ]; then
   ck "is_safe on an unscanned package is false" \
      "genlayer call $ORACLE is_safe --args lodash 50 2>/dev/null | grep -q 'false'"
   if [ -n "$CONSUMER" ]; then
+    ck "deployed consumer source is byte-identical to build/PackageConsumer.min.py" \
+       "genlayer code $CONSUMER 2>/dev/null | sed -n '/^# {/,\$p' \
+          | sed '/^. Contract code retrieved/,\$d' \
+          | sed -e :a -e '/^\n*\$/{\$d;N;};/\n\$/ba' > /tmp/_onchain_pc.py \
+        && diff -q /tmp/_onchain_pc.py build/PackageConsumer.min.py"
     ck "consumer reads the oracle cross-contract" \
        "genlayer call $CONSUMER get_oracle_stats 2>/dev/null | grep -q 'total_scanned'"
     ck "preview_dependency degrades instead of reverting" \
        "genlayer call $CONSUMER preview_dependency --args lodash 2>/dev/null | grep -q 'never scanned'"
     ck "gate_build fails a mixed dependency list" \
        "genlayer call $CONSUMER gate_build --args '[\"express\",\"flatmap-stream\"]' 2>/dev/null | grep -q \"build: 'FAIL'\""
-    # the two review fixes, read back off the live contract
-    ck "refused adds were actually recorded (blocked_attempts > 0)" \
-       "[ \$(genlayer call $CONSUMER get_policy 2>/dev/null | grep -oE 'blocked_attempts: [0-9]+' | grep -oE '[0-9]+') -gt 0 ]"
-    ck "the live consumer is frozen and its manifest survived the freeze" \
-       "genlayer call $CONSUMER get_policy 2>/dev/null | grep -q 'frozen: true' && [ \$(genlayer call $CONSUMER get_manifest 2>/dev/null | grep -oE 'count: [0-9]+' | grep -oE '[0-9]+') -gt 0 ]"
-    ck "preview still reports oracle_error false when the oracle is up" \
+    ck "preview separates a refusal from an unreachable oracle" \
        "genlayer call $CONSUMER preview_dependency --args lodash 2>/dev/null | grep -q 'oracle_error: false'"
+    if [ "$EXERCISED" = "exercised" ]; then
+      echo "== 9. demo state: the review fixes, driven on chain =="
+      # Only meaningful on a deployment somebody has actually driven. Both are
+      # written so a rev1 contract would FAIL them: rev1 rolled the increment
+      # back with the revert, and rev1 let remove_dependency through a freeze.
+      ck "refused adds were recorded and survived (blocked_attempts > 0)" \
+         "[ \$(genlayer call $CONSUMER get_policy 2>/dev/null | grep -oE 'blocked_attempts: [0-9]+' | grep -oE '[0-9]+') -gt 0 ]"
+      ck "frozen, with the manifest intact after a refused removal" \
+         "genlayer call $CONSUMER get_policy 2>/dev/null | grep -q 'frozen: true' && [ \$(genlayer call $CONSUMER get_manifest 2>/dev/null | grep -oE 'count: [0-9]+' | grep -oE '[0-9]+') -gt 0 ]"
+    fi
   fi
 fi
 

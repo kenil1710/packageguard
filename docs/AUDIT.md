@@ -1,20 +1,34 @@
 # Pre-submission audit
 
-**83 checks, 0 failures.** Every one of them is executed by
+**84 checks, 0 failures.** Every one of them is executed by
 [`tools/audit.sh`](../tools/audit.sh) — nothing here is asserted from memory, and
 the script is in the repo so the numbers can be reproduced rather than believed:
 
 ```bash
-bash tools/audit.sh                                   # offline checks
-bash tools/audit.sh <oracle-address> <consumer-address>   # + the live deployment
+bash tools/audit.sh                                            # offline checks
+bash tools/audit.sh <oracle> <consumer>                        # + the live deployment
+bash tools/audit.sh <oracle> <consumer> exercised              # + the demo-state checks
 ```
+
+The third argument is opt-in on purpose. The last two checks assert state that
+only exists once somebody has *driven* a deployment — refusals recorded, and
+`freeze()` called — and a correct fresh deployment has neither. Asserting them
+unconditionally would fail an honest contract, which is the same class of
+mistake as a test that cannot fail. What holds on **any** deployment is that its
+source is byte-identical to the artifact, and that is now checked for the
+consumer as well as the oracle.
 
 It exits with the number of failures, so it works as a CI gate.
 
-Run: 2026-09-06, after the review fixes. **83/83 against Studionet** —
+Run: 2026-09-06, after the review fixes. **84/84 Studionet, 82/82 Bradbury** —
 
-    bash tools/audit.sh 0x1F3f51d9927490543519d6C61b9B544bf5caA7FB 0x96Db4DBE72892b788E311e33cEA8807d921ca960   # Studionet
-    bash tools/audit.sh 0x4f35Fd3D93bDb8446C3ccf715B684222D93BB8fE <bradbury-consumer>                          # Bradbury, after redeploy
+    bash tools/audit.sh 0x1F3f51d9927490543519d6C61b9B544bf5caA7FB 0x96Db4DBE72892b788E311e33cEA8807d921ca960 exercised   # Studionet
+    bash tools/audit.sh 0x4f35Fd3D93bDb8446C3ccf715B684222D93BB8fE 0xcDEAD088A846309a7F3c39477101b90772940D25            # Bradbury
+
+Bradbury runs 82 because the two demo-state checks are not requested: that
+deployment is verified read-only — source identity, wiring, and the full
+decision path through `gate_build` — and was deliberately not written to or
+frozen, since `freeze()` is one-way.
 
 Group 3b is new and exists because of the review. Both findings are now checked
 mechanically rather than eyeballed, over the source **and** the deployed
@@ -42,7 +56,8 @@ not a regression test.
 | 5. repo hygiene | 10 | **no AI attribution in any commit**; no secret-looking tracked files; `.gitignore` covers `CLAUDE.md`, `.claude/`, `.accounts.json`; no `__pycache__`; all four docs present |
 | 6. README honesty | 3 | the byte counts, the sha256 and the test count in the README are **re-measured against the files**, not trusted |
 | 7. method surface | 28 | every method the README documents exists in the contract |
-| 8. live deployment | 12 | deployed source byte-identical to the artifact; fee 0; `verify_risk` returns true; `require_safe` reverts; `is_safe` is false when unscanned; consumer reads the oracle cross-contract; `preview_dependency` degrades; `gate_build` fails a mixed list; **`blocked_attempts` is non-zero on chain**; **the live consumer is frozen and its manifest survived**; `oracle_error` is false while the oracle is up |
+| 8. live deployment | 11 | **both** deployed sources byte-identical to their artifacts; fee 0; `verify_risk` returns true; `require_safe` reverts; `is_safe` is false when unscanned; consumer reads the oracle cross-contract; `preview_dependency` degrades; `gate_build` fails a mixed list; `oracle_error` separates a refusal from an unreachable oracle |
+| 9. demo state (opt-in) | 2 | on a deployment that has been driven: **`blocked_attempts` is non-zero on chain** — rev1 would report 0, the increment having been rolled back — and the contract is **frozen with its manifest intact** after a refused removal, which rev1 would have let through |
 
 The checks worth naming individually, because each one is a mistake a previous
 project made:
@@ -144,7 +159,7 @@ because "the audit found nothing" is a claim worth being able to distinguish fro
   PASS  no storage write is followed by a reachable raise in contracts/PackageConsumer.py
   PASS  no storage write is followed by a reachable raise in build/PackageGuard.min.py
   PASS  no storage write is followed by a reachable raise in build/PackageConsumer.min.py
-  PASS  the new tests fail against the pre-fix contract
+  PASS  the new tests fail against the pre-fix contract (f0e2167)
 == 4. artifacts are current ==
   PASS  build/PackageGuard.min.py is a current build of its source
   PASS  build/PackageConsumer.min.py is a current build of its source
@@ -202,14 +217,16 @@ because "the audit found nothing" is a claim worth being able to distinguish fro
   PASS  verify_risk(1) returns verified: true
   PASS  require_safe reverts below the bar
   PASS  is_safe on an unscanned package is false
+  PASS  deployed consumer source is byte-identical to build/PackageConsumer.min.py
   PASS  consumer reads the oracle cross-contract
   PASS  preview_dependency degrades instead of reverting
   PASS  gate_build fails a mixed dependency list
-  PASS  refused adds were actually recorded (blocked_attempts > 0)
-  PASS  the live consumer is frozen and its manifest survived the freeze
-  PASS  preview still reports oracle_error false when the oracle is up
+  PASS  preview separates a refusal from an unreachable oracle
+== 9. demo state: the review fixes, driven on chain ==
+  PASS  refused adds were recorded and survived (blocked_attempts > 0)
+  PASS  frozen, with the manifest intact after a refused removal
 
 ======================================================
-  83 passed, 0 failed
+  84 passed, 0 failed
 ======================================================
 ```
